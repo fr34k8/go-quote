@@ -6,6 +6,8 @@ A free quote downloader library and cli
 
 Downloads daily historical price quotes from Tiingo and daily/intraday data from various api's. Written in pure Go. No external dependencies. Now downloads crypto coin historical data from various exchanges.
 
+- Update: 09/04/2025 - added Tiingo CSV update mode (-update) with 10-day backfill, optional full re-download on corporate actions, and -concurrency for faster updates
+
 - Update: 04/01/2025 - added markets flag, wildcard input files, multiple inputs
 
 - Update: 03/02/2025 - Removed obsolete Yahoo support
@@ -47,7 +49,9 @@ Usage:
   quote -h | -help
   quote -v | -version
   quote <market> [-output=<outputFile>]
+  quote -markets=<markets> -all=true -outfile=stocks.csv
   quote [-years=<years>|(-start=<datestr> [-end=<datestr>])] [options] [-infile=<filename>|<symbol> ...]
+  quote -update=<path> [-end=<datestr>] [-backfill-days=10] [-full-redownload-on-ca] [-concurrency=<n>] [-token=<tiingo_token>]
 
 Options:
   -h -help             show help
@@ -65,6 +69,10 @@ Options:
   -all=<bool>          all in one file (true|false) [default=false]
   -log=<dest>          filename|stdout|stderr|discard [default=stdout]
   -delay=<ms>          delay in milliseconds between quote requests
+  -update=<path>       update an existing Tiingo CSV (single or -all multi) in place
+  -backfill-days=<n>   days of overlap to rewrite [default=10]
+  -full-redownload-on-ca  if splits/dividends detected, fully redownload the symbol block
+  -concurrency=<n>     concurrent symbol fetches in update mode [default=1]
 
 Note: not all periods work with all sources
 
@@ -99,7 +107,27 @@ quote etf
 
 # download fresh etf list and 5 years of etf data all in one file
 quote -markets=etf -all=true -outfile=etf.csv
+
+# update a large multi-symbol CSV in place (Tiingo), 4 concurrent fetchers
+quote -update=stocks.csv -concurrency=4
+
+# update a single-symbol CSV inferred from filename (e.g., spy.csv)
+quote -update=spy.csv -backfill-days=10 -full-redownload-on-ca
+
+# control request pacing with -delay and concurrency
+quote -delay=100 -update=stocks.csv -concurrency=8
 ```
+
+Update mode rate limiting
+
+- -delay=0: no global throttle; workers issue requests immediately.
+- -delay>0: a single global limiter spaces requests across all workers by ~delay ms. Use higher -concurrency to overlap work while keeping polite pacing.
+
+Tiingo rate limit guidance
+
+- Start conservatively: `-delay=100..250` and `-concurrency=2..4`.
+- Increase gradually and watch for `429 Too Many Requests` responses.
+- Leave `-delay` > 0 to be polite; set `-delay=0` only if your plan allows higher throughput.
 
 ## Install library
 

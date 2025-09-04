@@ -1,11 +1,14 @@
 package quote
 
 import (
-	"fmt"
-	"path/filepath"
-	"reflect"
-	"runtime"
-	"testing"
+    "fmt"
+    "os"
+    "path/filepath"
+    "reflect"
+    "runtime"
+    "strings"
+    "testing"
+    "time"
 )
 
 // assert fails the test if the condition is false.
@@ -62,6 +65,196 @@ func TestNewQuoteFromCSV(t *testing.T) {
 	if q.Close[len(q.Close)-1] != 87.62 {
 		t.Error("Invalid last value")
 	}
+}
+
+// --- Update mode tests and helpers ---
+
+// helper to write a temp file with contents and return path and cleanup func
+func writeTempFile(t *testing.T, name, contents string) (string, func()) {
+    t.Helper()
+    dir := t.TempDir()
+    path := filepath.Join(dir, name)
+    if err := os.WriteFile(path, []byte(contents), 0644); err != nil {
+        t.Fatalf("write temp file: %v", err)
+    }
+    return path, func() {}
+}
+
+func TestUpdateSingle_NoCA(t *testing.T) {
+    // Prepare initial single-symbol CSV with 5 days: Jan 1..5
+    initial := strings.Join([]string{
+        "datetime,open,high,low,close,volume",
+        "2025-01-01 00:00,1,1,1,10,100",
+        "2025-01-02 00:00,1,1,1,11,100",
+        "2025-01-03 00:00,1,1,1,12,100",
+        "2025-01-04 00:00,1,1,1,13,100",
+        "2025-01-05 00:00,1,1,1,14,100",
+        "",
+    }, "\n")
+    path, _ := writeTempFile(t, "spy.csv", initial)
+
+    // Stub Tiingo fetch to return overlap (from cutoff=Jan 03) to Jan 07, with different close values
+    prev := tiingoFetch
+    tiingoFetch = func(symbol string, from, to time.Time, token string) ([]tquoteRaw, error) {
+        tq := []tquoteRaw{}
+        // from should be 2025-01-03
+        for d := 3; d <= 7; d++ {
+            date := time.Date(2025, 1, d, 0, 0, 0, 0, time.UTC)
+            tq = append(tq, tquoteRaw{
+                Date:        date.Format("2006-01-02"),
+                AdjOpen:     2,
+                AdjHigh:     3,
+                AdjLow:      1,
+                AdjClose:    float64(40 + d), // 43..47
+                Volume:      200,
+                SplitFactor: 1.0,
+                DivCash:     0.0,
+            })
+        }
+        return tq, nil
+    }
+    defer func() { tiingoFetch = prev }()
+
+    Delay = 0
+    end := time.Date(2025, 1, 8, 0, 0, 0, 0, time.UTC)
+    if err := UpdateFileTiingo(path, "token", 2, false, 1, end); err != nil {
+        t.Fatalf("update failed: %v", err)
+    }
+
+    out, _ := os.ReadFile(path)
+    got := string(out)
+    // Expect preserved rows for Jan 1..2, then updates 3..7 with adjusted values
+    want := strings.Join([]string{
+        "datetime,open,high,low,close,volume",
+        "2025-01-01 00:00,1,1,1,10,100",
+        "2025-01-02 00:00,1,1,1,11,100",
+        "2025-01-03 00:00,2.00,3.00,1.00,43.00,200.00",
+        "2025-01-04 00:00,2.00,3.00,1.00,44.00,200.00",
+        "2025-01-05 00:00,2.00,3.00,1.00,45.00,200.00",
+        "2025-01-06 00:00,2.00,3.00,1.00,46.00,200.00",
+        "2025-01-07 00:00,2.00,3.00,1.00,47.00,200.00",
+        "",
+    }, "\n")
+
+    if got != want {
+        t.Fatalf("single update mismatch\nwant:\n%s\n---\ngot:\n%s", want, got)
+    }
+}
+
+func TestUpdateMulti_Concurrency_OrderPreserved(t *testing.T) {
+    // Initial multi CSV with aaa and bbb, 3 days each
+    initial := strings.Join([]string{
+        "symbol,datetime,open,high,low,close,volume",
+        "aaa,2025-01-01 00:00,1,1,1,10,100",
+        "aaa,2025-01-02 00:00,1,1,1,11,100",
+        "aaa,2025-01-03 00:00,1,1,1,12,100",
+        "bbb,2025-01-01 00:00,1,1,1,20,100",
+        "bbb,2025-01-02 00:00,1,1,1,21,100",
+        "bbb,2025-01-03 00:00,1,1,1,22,100",
+        "",
+    }, "\n")
+    path, _ := writeTempFile(t, "multi.csv", initial)
+
+    // Stub per-symbol responses (overlap from Jan 02)
+    prev := tiingoFetch
+    tiingoFetch = func(symbol string, from, to time.Time, token string) ([]tquoteRaw, error) {
+        tq := []tquoteRaw{}
+        switch symbol {
+        case "aaa":
+            for d := 2; d <= 6; d++ { // 2..6
+                date := time.Date(2025, 1, d, 0, 0, 0, 0, time.UTC)
+                tq = append(tq, tquoteRaw{Date: date.Format("2006-01-02"), AdjOpen: 2, AdjHigh: 3, AdjLow: 1, AdjClose: float64(100 + d), Volume: 200, SplitFactor: 1.0})
+            }
+        case "bbb":
+            for d := 2; d <= 4; d++ { // 2..4
+                date := time.Date(2025, 1, d, 0, 0, 0, 0, time.UTC)
+                tq = append(tq, tquoteRaw{Date: date.Format("2006-01-02"), AdjOpen: 5, AdjHigh: 6, AdjLow: 4, AdjClose: float64(200 + d), Volume: 300, SplitFactor: 1.0})
+            }
+        }
+        return tq, nil
+    }
+    defer func() { tiingoFetch = prev }()
+
+    Delay = 0
+    end := time.Date(2025, 1, 8, 0, 0, 0, 0, time.UTC)
+    if err := UpdateFileTiingo(path, "token", 1, false, 3, end); err != nil {
+        t.Fatalf("update failed: %v", err)
+    }
+
+    got := string(must(os.ReadFile(path)))
+    want := strings.Join([]string{
+        "symbol,datetime,open,high,low,close,volume",
+        // aaa preserved day 1
+        "aaa,2025-01-01 00:00,1,1,1,10,100",
+        // aaa updates 2..6
+        "aaa,2025-01-02 00:00,2.00,3.00,1.00,102.00,200.00",
+        "aaa,2025-01-03 00:00,2.00,3.00,1.00,103.00,200.00",
+        "aaa,2025-01-04 00:00,2.00,3.00,1.00,104.00,200.00",
+        "aaa,2025-01-05 00:00,2.00,3.00,1.00,105.00,200.00",
+        "aaa,2025-01-06 00:00,2.00,3.00,1.00,106.00,200.00",
+        // bbb preserved day 1
+        "bbb,2025-01-01 00:00,1,1,1,20,100",
+        // bbb updates 2..4
+        "bbb,2025-01-02 00:00,5.00,6.00,4.00,202.00,300.00",
+        "bbb,2025-01-03 00:00,5.00,6.00,4.00,203.00,300.00",
+        "bbb,2025-01-04 00:00,5.00,6.00,4.00,204.00,300.00",
+        "",
+    }, "\n")
+
+    if got != want {
+        t.Fatalf("multi update mismatch\nwant:\n%s\n---\ngot:\n%s", want, got)
+    }
+}
+
+func TestUpdateSingle_FullRedownloadOnCA(t *testing.T) {
+    initial := strings.Join([]string{
+        "datetime,open,high,low,close,volume",
+        "2025-01-01 00:00,1,1,1,10,100",
+        "2025-01-02 00:00,1,1,1,11,100",
+        "2025-01-03 00:00,1,1,1,12,100",
+        "",
+    }, "\n")
+    path, _ := writeTempFile(t, "abc.csv", initial)
+
+    prev := tiingoFetch
+    calls := 0
+    tiingoFetch = func(symbol string, from, to time.Time, token string) ([]tquoteRaw, error) {
+        calls++
+        // first call simulates CA in overlap; second call returns full history
+        if calls == 1 {
+            return []tquoteRaw{{Date: "2025-01-02", AdjOpen: 2, AdjHigh: 3, AdjLow: 1, AdjClose: 22, Volume: 200, SplitFactor: 2.0}}, nil
+        }
+        return []tquoteRaw{
+            {Date: "2025-01-01", AdjOpen: 2, AdjHigh: 3, AdjLow: 1, AdjClose: 21, Volume: 200},
+            {Date: "2025-01-02", AdjOpen: 2, AdjHigh: 3, AdjLow: 1, AdjClose: 22, Volume: 200},
+            {Date: "2025-01-03", AdjOpen: 2, AdjHigh: 3, AdjLow: 1, AdjClose: 23, Volume: 200},
+        }, nil
+    }
+    defer func() { tiingoFetch = prev }()
+
+    Delay = 0
+    end := time.Date(2025, 1, 4, 0, 0, 0, 0, time.UTC)
+    if err := UpdateFileTiingo(path, "token", 1, true, 1, end); err != nil {
+        t.Fatalf("update failed: %v", err)
+    }
+
+    got := string(must(os.ReadFile(path)))
+    want := strings.Join([]string{
+        "datetime,open,high,low,close,volume",
+        "2025-01-01 00:00,2.00,3.00,1.00,21.00,200.00",
+        "2025-01-02 00:00,2.00,3.00,1.00,22.00,200.00",
+        "2025-01-03 00:00,2.00,3.00,1.00,23.00,200.00",
+        "",
+    }, "\n")
+    if got != want {
+        t.Fatalf("full re-download on CA mismatch\nwant:\n%s\n---\ngot:\n%s", want, got)
+    }
+}
+
+// small helper to panic on error in tests when reading
+func must(b []byte, err error) []byte {
+    if err != nil { panic(err) }
+    return b
 }
 
 func TestNewQuotesFromCSV(t *testing.T) {
