@@ -65,25 +65,25 @@ const (
 )
 
 type quoteflags struct {
-    years   int
-    delay   int
-    start   string
-    end     string
-    period  string
-    source  string
-    token   string
-    markets string
-    infile  string
-    outfile string
-    format  string
-    log     string
-    all     bool
-    // update mode
-    updatePath     string
-    backfillDays   int
-    fullRedownload bool
-    concurrency    int
-    version bool
+	years   int
+	delay   int
+	start   string
+	end     string
+	period  string
+	source  string
+	token   string
+	markets string
+	infile  string
+	outfile string
+	format  string
+	log     string
+	all     bool
+	// update mode
+	updatePath     string
+	backfillDays   int
+	fullRedownload bool
+	concurrency    int
+	version        bool
 }
 
 func check(e error) {
@@ -107,8 +107,8 @@ func checkFlags(flags quoteflags) error {
 	// validate period
 	if flags.source == "tiingo" {
 		// check period
-		if flags.period != "d" {
-			return fmt.Errorf("invalid period for tiingo, must be 'd'")
+		if !(flags.period == "d" || flags.period == "w" || flags.period == "m") {
+			return fmt.Errorf("invalid period for tiingo, must be 'd', 'w', or 'm'")
 		}
 		// check token
 		if flags.token == "" {
@@ -314,7 +314,7 @@ func outputAll(symbols []string, flags quoteflags) error {
 	quotes := quote.Quotes{}
 	var err error
 	if flags.source == "tiingo" {
-		quotes, err = quote.NewQuotesFromTiingoSyms(symbols, from.Format(dateFormat), to.Format(dateFormat), flags.token)
+		quotes, err = quote.NewQuotesFromTiingoSyms(symbols, from.Format(dateFormat), to.Format(dateFormat), period, flags.token)
 	} else if flags.source == "tiingo-crypto" {
 		quotes, err = quote.NewQuotesFromTiingoCryptoSyms(symbols, from.Format(dateFormat), to.Format(dateFormat), period, flags.token)
 	} else if flags.source == "coinbase" {
@@ -345,7 +345,7 @@ func outputIndividual(symbols []string, flags quoteflags) error {
 	for _, sym := range symbols {
 		var q quote.Quote
 		if flags.source == "tiingo" {
-			q, _ = quote.NewQuoteFromTiingo(sym, from.Format(dateFormat), to.Format(dateFormat), flags.token)
+			q, _ = quote.NewQuoteFromTiingo(sym, from.Format(dateFormat), to.Format(dateFormat), period, flags.token)
 		} else if flags.source == "tiingo-crypto" {
 			q, _ = quote.NewQuoteFromTiingoCrypto(sym, from.Format(dateFormat), to.Format(dateFormat), period, flags.token)
 		} else if flags.source == "coinbase" {
@@ -407,52 +407,52 @@ func main() {
 	flag.StringVar(&flags.outfile, "outfile", "", "output filename")
 	flag.StringVar(&flags.markets, "markets", "", "list of valid markets (comma separated)")
 	flag.StringVar(&flags.format, "format", "csv", "csv|json")
-    flag.StringVar(&flags.log, "log", "stdout", "<filename>|stdout")
-    flag.BoolVar(&flags.all, "all", false, "all output in one file")
-    flag.BoolVar(&flags.version, "v", false, "show version")
-    flag.BoolVar(&flags.version, "version", false, "show version")
-    // update flags
-    flag.StringVar(&flags.updatePath, "update", "", "update an existing Tiingo CSV in place")
-    flag.IntVar(&flags.backfillDays, "backfill-days", 10, "days of overlap to rewrite for splits/dividends")
-    flag.BoolVar(&flags.fullRedownload, "full-redownload-on-ca", false, "if splits/dividends detected, fully redownload that symbol block")
-    flag.IntVar(&flags.concurrency, "concurrency", 1, "number of concurrent symbol fetches in update mode")
-    flag.Parse()
+	flag.StringVar(&flags.log, "log", "stdout", "<filename>|stdout")
+	flag.BoolVar(&flags.all, "all", false, "all output in one file")
+	flag.BoolVar(&flags.version, "v", false, "show version")
+	flag.BoolVar(&flags.version, "version", false, "show version")
+	// update flags
+	flag.StringVar(&flags.updatePath, "update", "", "update an existing Tiingo CSV in place")
+	flag.IntVar(&flags.backfillDays, "backfill-days", 10, "days of overlap to rewrite for splits/dividends")
+	flag.BoolVar(&flags.fullRedownload, "full-redownload-on-ca", false, "if splits/dividends detected, fully redownload that symbol block")
+	flag.IntVar(&flags.concurrency, "concurrency", 1, "number of concurrent symbol fetches in update mode")
+	flag.Parse()
 
 	if flags.version {
 		fmt.Println(version)
 		os.Exit(0)
 	}
 
-    quote.Delay = time.Duration(flags.delay)
+	quote.Delay = time.Duration(flags.delay)
 
 	err = setOutput(flags)
 	check(err)
 
-    err = checkFlags(flags)
-    check(err)
+	err = checkFlags(flags)
+	check(err)
 
-    // Update mode (Tiingo only)
-    if flags.updatePath != "" {
-        if flags.source != "tiingo" { // only tiingo supported for now
-            fmt.Println("update mode currently supports -source=tiingo only")
-            os.Exit(1)
-        }
-        if flags.token == "" {
-            fmt.Println("update mode requires TIINGO_API_TOKEN or -token")
-            os.Exit(1)
-        }
-        var endTime time.Time
-        if strings.TrimSpace(flags.end) != "" {
-            endTime = quote.ParseDateString(flags.end)
-        } else {
-            endTime = time.Now()
-        }
-        if err := quote.UpdateFileTiingo(flags.updatePath, flags.token, flags.backfillDays, flags.fullRedownload, flags.concurrency, endTime); err != nil {
-            fmt.Printf("Error updating %s: %v\n", flags.updatePath, err)
-            os.Exit(1)
-        }
-        os.Exit(0)
-    }
+	// Update mode (Tiingo only)
+	if flags.updatePath != "" {
+		if flags.source != "tiingo" { // only tiingo supported for now
+			fmt.Println("update mode currently supports -source=tiingo only")
+			os.Exit(1)
+		}
+		if flags.token == "" {
+			fmt.Println("update mode requires TIINGO_API_TOKEN or -token")
+			os.Exit(1)
+		}
+		var endTime time.Time
+		if strings.TrimSpace(flags.end) != "" {
+			endTime = quote.ParseDateString(flags.end)
+		} else {
+			endTime = time.Now()
+		}
+		if err := quote.UpdateFileTiingo(flags.updatePath, flags.token, flags.backfillDays, flags.fullRedownload, flags.concurrency, endTime); err != nil {
+			fmt.Printf("Error updating %s: %v\n", flags.updatePath, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 
 	symbols, err = getSymbols(flags, flag.Args())
 	check(err)

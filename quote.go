@@ -529,7 +529,7 @@ func pickRandomUserAgent() string {
 	return USER_AGENTS[rand.Intn(len(USER_AGENTS))]
 }
 
-func tiingoDaily(symbol string, from, to time.Time, token string) (Quote, error) {
+func tiingoDaily(symbol string, from, to time.Time, period Period, token string) (Quote, error) {
 
 	type tquote struct {
 		AdjClose    float64 `json:"adjClose"`
@@ -549,14 +549,20 @@ func tiingoDaily(symbol string, from, to time.Time, token string) (Quote, error)
 
 	var tiingo []tquote
 
-	url := fmt.Sprintf(
+	urlStr := fmt.Sprintf(
 		"https://api.tiingo.com/tiingo/daily/%s/prices?startDate=%s&endDate=%s",
 		strings.TrimSpace(strings.Replace(symbol, "/", "-", -1)),
 		url.QueryEscape(from.Format("2006-1-2")),
 		url.QueryEscape(to.Format("2006-1-2")))
 
+	if period == Weekly {
+		urlStr += "&resampleFreq=weekly"
+	} else if period == Monthly {
+		urlStr += "&resampleFreq=monthly"
+	}
+
 	client := &http.Client{Timeout: ClientTimeout}
-	req, _ := http.NewRequest("GET", url, nil)
+	req, _ := http.NewRequest("GET", urlStr, nil)
 	req.Header.Set("Authorization", fmt.Sprintf("Token %s", token))
 	resp, err := client.Do(req)
 
@@ -1158,12 +1164,12 @@ func tiingoCrypto(symbol string, from, to time.Time, period Period, token string
 }
 
 // NewQuoteFromTiingo - Tiingo daily historical prices for a symbol
-func NewQuoteFromTiingo(symbol, startDate, endDate string, token string) (Quote, error) {
+func NewQuoteFromTiingo(symbol, startDate, endDate string, period Period, token string) (Quote, error) {
 
 	from := ParseDateString(startDate)
 	to := ParseDateString(endDate)
 
-	return tiingoDaily(symbol, from, to, token)
+	return tiingoDaily(symbol, from, to, period, token)
 }
 
 // NewQuoteFromTiingoCrypto - Tiingo crypto historical prices for a symbol
@@ -1176,11 +1182,11 @@ func NewQuoteFromTiingoCrypto(symbol, startDate, endDate string, period Period, 
 }
 
 // NewQuotesFromTiingoSyms - create a list of prices from symbols in string array
-func NewQuotesFromTiingoSyms(symbols []string, startDate, endDate string, token string) (Quotes, error) {
+func NewQuotesFromTiingoSyms(symbols []string, startDate, endDate string, period Period, token string) (Quotes, error) {
 
 	quotes := Quotes{}
 	for _, symbol := range symbols {
-		quote, err := NewQuoteFromTiingo(symbol, startDate, endDate, token)
+		quote, err := NewQuoteFromTiingo(symbol, startDate, endDate, period, token)
 		if err == nil {
 			quotes = append(quotes, quote)
 		} else {
