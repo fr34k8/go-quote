@@ -12,6 +12,7 @@ import (
     "bufio"
     "bytes"
     "encoding/json"
+    "errors"
     "fmt"
     "io"
     "log"
@@ -640,6 +641,16 @@ func UpdateFileTiingo(path string, token string, backfillDays int, fullRedownloa
 
 // --- Internal helpers for update mode ---
 
+// SymbolNotFoundError indicates that a symbol was not found in the data source.
+// This error type allows callers to distinguish "not found" from other errors.
+type SymbolNotFoundError struct {
+    Symbol string
+}
+
+func (e *SymbolNotFoundError) Error() string {
+    return fmt.Sprintf("symbol '%s' not found", e.Symbol)
+}
+
 // tquoteRaw mirrors Tiingo daily response for fields we care about.
 type tquoteRaw struct {
     AdjClose    float64 `json:"adjClose"`
@@ -685,7 +696,7 @@ func fetchTiingoDailyRaw(symbol string, from, to time.Time, token string) ([]tqu
         return tiingo, nil
     }
     if resp.StatusCode == http.StatusNotFound {
-        return nil, fmt.Errorf("symbol '%s' not found", symbol)
+        return nil, &SymbolNotFoundError{Symbol: symbol}
     }
     return nil, fmt.Errorf("tiingo http status %d", resp.StatusCode)
 }
@@ -797,6 +808,11 @@ func updateSingleTiingo(path, header, symbol, token string, backfillDays int, fu
     // Prefetch overlap/new range and check CA
     raw, err := tiingoFetch(symbol, cutoff, end, token)
     if err != nil {
+        var notFoundErr *SymbolNotFoundError
+        if errors.As(err, &notFoundErr) {
+            Log.Printf("symbol '%s' not found, skipping update", symbol)
+            return nil
+        }
         return err
     }
     if fullRedownload && detectCA(raw) {
@@ -804,6 +820,11 @@ func updateSingleTiingo(path, header, symbol, token string, backfillDays int, fu
         cutoff = earliest
         raw, err = tiingoFetch(symbol, cutoff, end, token)
         if err != nil {
+            var notFoundErr *SymbolNotFoundError
+            if errors.As(err, &notFoundErr) {
+                Log.Printf("symbol '%s' not found, skipping update", symbol)
+                return nil
+            }
             return err
         }
     }
@@ -990,7 +1011,14 @@ func updateMultiTiingo(path, header, token string, backfillDays int, fullRedownl
     close(errCh)
     var errs []string
     for fe := range errCh {
-        errs = append(errs, fmt.Sprintf("%s: %v", fe.sym, fe.err))
+        var notFoundErr *SymbolNotFoundError
+        if errors.As(fe.err, &notFoundErr) {
+            // Log "not found" as info, don't treat as error
+            Log.Printf("symbol '%s' not found, skipping", fe.sym)
+        } else {
+            // Real errors get collected
+            errs = append(errs, fmt.Sprintf("%s: %v", fe.sym, fe.err))
+        }
     }
     if len(errs) > 0 {
         return fmt.Errorf("update fetch errors (%d): %s", len(errs), strings.Join(errs, "; "))
