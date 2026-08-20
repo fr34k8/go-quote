@@ -644,7 +644,7 @@ func TestParseFormat(t *testing.T) {
 }
 
 func TestProviderRegistry(t *testing.T) {
-	want := []string{"coinbase", "tiingo", "tiingo-crypto"}
+	want := []string{"binance", "coinbase", "tiingo", "tiingo-crypto"}
 	got := ProviderNames()
 	if len(got) != len(want) {
 		t.Fatalf("ProviderNames() = %v, want %v", got, want)
@@ -674,6 +674,11 @@ func TestProviderPeriodValidation(t *testing.T) {
 		{"tiingo-crypto", Weekly, false},
 		{"coinbase", Min5, true},
 		{"coinbase", Hour6, false},
+		// Binance serves every period, including Day3, which no other source
+		// here supports at all.
+		{"binance", Day3, true},
+		{"binance", Hour6, true},
+		{"binance", Monthly, true},
 	}
 	for _, tc := range cases {
 		p, err := DefaultClient.Provider(tc.source)
@@ -820,6 +825,8 @@ func TestProvidersSetPrecision(t *testing.T) {
 			w.Write([]byte(`[{"ticker":"btcusd","priceData":[{"date":"2024-01-01T00:00:00Z","open":1,"high":2,"low":0.5,"close":1.5,"volume":10}]}]`))
 		case strings.Contains(r.URL.Path, "/candles"):
 			w.Write([]byte(`[[1704067200,0.0804,0.0835,0.0814,0.0834,5731155.2]]`))
+		case strings.Contains(r.URL.Path, "/klines"):
+			w.Write([]byte(`[[1704067200000,"0.08140000","0.08350000","0.08040000","0.08340000","5731155.20000000",1704153599999,"1000",100,"1","1","0"]]`))
 		default:
 			w.Write([]byte(tiingoDailyBody))
 		}
@@ -854,6 +861,18 @@ func TestProvidersSetPrecision(t *testing.T) {
 	}
 	if qb.precision() != PrecisionCrypto {
 		t.Errorf("coinbase precision = %d, want %d", qb.precision(), PrecisionCrypto)
+	}
+
+	// A TRY-quoted Binance pair contains none of "BTC"/"ETH"/"USD" as a *quote*
+	// currency, which is the shape the symbol heuristic reads as an equity.
+	qn, err := c.Binance(context.Background(), "DOGETRY",
+		time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC), Daily)
+	if err != nil {
+		t.Fatalf("Binance: %v", err)
+	}
+	if qn.precision() != PrecisionCrypto {
+		t.Errorf("binance precision = %d, want %d", qn.precision(), PrecisionCrypto)
 	}
 }
 
@@ -951,6 +970,8 @@ func TestAllSourcesProduceUTC(t *testing.T) {
 			w.Write([]byte(`[{"ticker":"btcusd","priceData":[{"date":"2024-01-01T00:00:00Z","open":1,"high":2,"low":0.5,"close":1.5,"volume":10}]}]`))
 		case strings.Contains(r.URL.Path, "/candles"):
 			w.Write([]byte(`[[1704067200,1,2,0.5,1.5,10]]`))
+		case strings.Contains(r.URL.Path, "/klines"):
+			w.Write([]byte(`[[1704067200000,"1","2","0.5","1.5","10",1704153599999,"1",1,"1","1","0"]]`))
 		default:
 			w.Write([]byte(`[{"date":"2024-01-01T00:00:00.000Z","adjOpen":1,"adjHigh":2,"adjLow":0.5,"adjClose":1.5,"volume":10}]`))
 		}
@@ -973,11 +994,15 @@ func TestAllSourcesProduceUTC(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Coinbase: %v", err)
 	}
+	bn, err := c.Binance(context.Background(), "BTCUSDT", from, to, Daily)
+	if err != nil {
+		t.Fatalf("Binance: %v", err)
+	}
 
 	for _, tc := range []struct {
 		name string
 		q    Quote
-	}{{"tiingo daily", daily}, {"tiingo crypto", crypto}, {"coinbase", cb}} {
+	}{{"tiingo daily", daily}, {"tiingo crypto", crypto}, {"coinbase", cb}, {"binance", bn}} {
 		if len(tc.q.Date) == 0 {
 			t.Fatalf("%s returned no bars", tc.name)
 		}

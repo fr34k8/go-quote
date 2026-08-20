@@ -6,6 +6,8 @@ A free quote downloader library and cli
 
 Downloads daily historical price quotes from Tiingo and daily/intraday data from various api's. Written in pure Go. No external dependencies. Now downloads crypto coin historical data from various exchanges.
 
+- Update: 08/19/2026 - Added Binance support (`-source=binance`), restoring the source removed in 2024. Uses `data-api.binance.vision`, which needs no API key and is not geo-restricted; `api.binance.com` returns 451 outside eligible regions. Supports every period the package defines, including `3d`, which no other source offers
+
 - Update: 08/19/2026 - Modernization: added `Client` (context, retries, shared HTTP client) and a `Provider` registry; split the library into topic files; requires Go 1.24+. Fixes: EUR/GBP-quoted Coinbase pairs were rounded to 2 decimals and lost their price data, all timestamps are now UTC, `-markets=etf` works from the library API, multi-symbol CSV parsing no longer scrambles symbols, and CSV round-trips no longer append a phantom zero bar. Existing API is unchanged; older entry points still work and are marked deprecated
 
 - Update: 09/04/2025 - added Tiingo CSV update mode (-update) with 10-day backfill, optional full re-download on corporate actions, and -concurrency for faster updates
@@ -51,7 +53,6 @@ Usage:
   quote -h | -help
   quote -v | -version
   quote [-outfile=<outputFile>] <market>
-  quote -markets=<markets> -all=true -outfile=stocks.csv
   quote [-years=<years>|(-start=<datestr> [-end=<datestr>])] [options] [-infile=<filename>|<symbol> ...]
   quote -update=<path> [-end=<datestr>] [-backfill-days=<n>] [-full-redownload-on-ca] [-concurrency=<n>] [-token=<tiingo_token>]
 
@@ -65,7 +66,7 @@ Options:
   -infile=<filename>   list of symbols to download
   -outfile=<filename>  output filename
   -period=<period>     1m|3m|5m|15m|30m|1h|2h|4h|6h|8h|12h|d|3d|w|m [default=d]
-  -source=<source>     tiingo|tiingo-crypto|coinbase [default=tiingo]
+  -source=<source>     tiingo|tiingo-crypto|coinbase|binance [default=tiingo]
   -token=<tiingo_tok>  tingo api token [default=TIINGO_API_TOKEN]
   -format=<format>     (csv|json|hs|ami) [default=csv]
   -all=<bool>          all in one file (true|false) [default=false]
@@ -102,6 +103,12 @@ quote spy
 
 # downloads 1 year of bitcoin history to BTC-USD.csv
 quote -years=1 -source=coinbase BTC-USD
+
+# downloads 1 year of bitcoin history from Binance (no api key needed)
+quote -years=1 -source=binance BTCUSDT
+
+# 3-day bars, a period only Binance supports
+quote -years=1 -source=binance -period=3d BTCUSDT
 
 
 # downloads full etf symbol list to etf.txt, also works for nasdaq,nasdaq100,nyse,amex
@@ -183,7 +190,7 @@ func main() {
 		Retry: quote.RetryPolicy{Max: 3}, // backs off on 429 and 5xx
 	}
 
-	p, err := c.Provider("tiingo") // or "tiingo-crypto", "coinbase"
+	p, err := c.Provider("tiingo") // or "tiingo-crypto", "coinbase", "binance"
 	if err != nil {
 		panic(err)
 	}

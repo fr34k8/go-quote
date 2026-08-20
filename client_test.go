@@ -3,8 +3,12 @@ package quote
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -18,6 +22,7 @@ func newTestClient(srv *httptest.Server) *Client {
 		tiingoBase:   srv.URL,
 		coinbaseBase: srv.URL,
 		nasdaqBase:   srv.URL,
+		binanceBase:  srv.URL,
 	}
 }
 
@@ -253,5 +258,205 @@ func TestClientNilSafeAccessors(t *testing.T) {
 	}
 	if c.tiingoURL() != defaultTiingoBaseURL {
 		t.Errorf("tiingoURL() = %q", c.tiingoURL())
+	}
+}
+
+// --- Binance ---
+
+// One kline row: [openTime, open, high, low, close, volume, closeTime, ...].
+// Prices and volumes are JSON strings and times are milliseconds.
+func binanceRow(openTimeMs int64, open, high, low, cl, vol string) string {
+	return fmt.Sprintf(`[%d,%q,%q,%q,%q,%q,%d,"0",0,"0","0","0"]`,
+		openTimeMs, open, high, low, cl, vol, openTimeMs+86399999)
+}
+
+func TestClientBinance(t *testing.T) {
+	var gotPath string
+	var gotQuery url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotQuery = r.URL.Query()
+		fmt.Fprintf(w, "[%s,%s]",
+			binanceRow(1704067200000, "42283.58", "45922.00", "42222.00", "44179.55", "27174.29903"),
+			binanceRow(1704153600000, "44179.55", "45879.63", "44148.34", "44946.91", "65146.40661"))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv)
+	from := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	to := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
+
+	q, err := c.Binance(context.Background(), "btcusdt", from, to, Daily)
+	if err != nil {
+		t.Fatalf("Binance: %v", err)
+	}
+
+	if gotPath != "/api/v3/klines" {
+		t.Errorf("path = %q, want /api/v3/klines", gotPath)
+	}
+	// Symbols are upper-cased: Binance rejects "btcusdt" as an invalid symbol.
+	if got := gotQuery.Get("symbol"); got != "BTCUSDT" {
+		t.Errorf("symbol = %q, want BTCUSDT", got)
+	}
+	if got := gotQuery.Get("interval"); got != "1d" {
+		t.Errorf("interval = %q, want 1d", got)
+	}
+	if got := gotQuery.Get("startTime"); got != "1704067200000" {
+		t.Errorf("startTime = %q, want 1704067200000 (ms)", got)
+	}
+	if got := gotQuery.Get("limit"); got != "1000" {
+		t.Errorf("limit = %q, want 1000", got)
+	}
+
+	if len(q.Close) != 2 {
+		t.Fatalf("got %d bars, want 2", len(q.Close))
+	}
+	// Prices arrive as strings; they must be parsed, not dropped.
+	if q.Open[0] != 42283.58 || q.High[0] != 45922.00 || q.Low[0] != 42222.00 {
+		t.Errorf("bar 0 OHL = %v/%v/%v, want 42283.58/45922/42222", q.Open[0], q.High[0], q.Low[0])
+	}
+	if q.Close[1] != 44946.91 || q.Volume[1] != 65146.40661 {
+		t.Errorf("bar 1 close/vol = %v/%v, want 44946.91/65146.40661", q.Close[1], q.Volume[1])
+	}
+	if q.Precision != PrecisionCrypto {
+		t.Errorf("Precision = %d, want %d", q.Precision, PrecisionCrypto)
+	}
+	// openTime, not closeTime: the removed implementation used field 6, which
+	// labelled every bar at the end of its interval instead of the start.
+	if !q.Date[0].Equal(from) {
+		t.Errorf("date[0] = %v, want %v (openTime)", q.Date[0], from)
+	}
+	if loc := q.Date[0].Location(); loc != time.UTC {
+		t.Errorf("location = %v, want UTC", loc)
+	}
+}
+
+// Binance reports an unknown symbol as HTTP 400 with a code in the body, not as
+// a 404, so the status alone cannot identify it.
+func TestClientBinanceSymbolNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"code":-1121,"msg":"Invalid symbol."}`))
+	}))
+	defer srv.Close()
+
+	_, err := newTestClient(srv).Binance(context.Background(), "NOTREAL",
+		time.Now(), time.Now(), Daily)
+	var snf *SymbolNotFoundError
+	if !errors.As(err, &snf) {
+		t.Fatalf("err = %v, want SymbolNotFoundError", err)
+	}
+	if snf.Symbol != "NOTREAL" {
+		t.Errorf("symbol = %q, want NOTREAL", snf.Symbol)
+	}
+}
+
+// A 400 that is not -1121 is a different problem and must not be reported as a
+// missing symbol.
+func TestClientBinanceOtherErrorIsNotNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"code":-1120,"msg":"Invalid interval."}`))
+	}))
+	defer srv.Close()
+
+	_, err := newTestClient(srv).Binance(context.Background(), "BTCUSDT",
+		time.Now(), time.Now(), Daily)
+	var snf *SymbolNotFoundError
+	if errors.As(err, &snf) {
+		t.Error("an invalid-interval error must not be reported as a missing symbol")
+	}
+	var he *HTTPError
+	if !errors.As(err, &he) {
+		t.Fatalf("err = %v, want *HTTPError", err)
+	}
+}
+
+// Binance clamps limit to 1000 silently. Paging must resume from the last bar
+// actually returned, so a full page followed by a short one produces one
+// contiguous series with no gap and no duplicate at the seam.
+func TestClientBinancePagingAcrossFullPage(t *testing.T) {
+	const day = 86400000
+	var requests []int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start, _ := strconv.ParseInt(r.URL.Query().Get("startTime"), 10, 64)
+		requests = append(requests, start)
+
+		// Emit a full page of 1000 daily bars from startTime, then a short
+		// second page of 3, then nothing.
+		var n int
+		switch len(requests) {
+		case 1:
+			n = binanceMaxBars
+		case 2:
+			n = 3
+		}
+		// Bars sit on interval boundaries: a startTime in the middle of a day
+		// returns the next whole day, as the real API does. Without this the
+		// stub would happily emit bars 1ms off the grid and hide a seam bug.
+		first := (start + day - 1) / day * day
+		rows := make([]string, n)
+		for i := range n {
+			rows[i] = binanceRow(first+int64(i)*day, "1", "2", "0.5", "1.5", "10")
+		}
+		fmt.Fprintf(w, "[%s]", strings.Join(rows, ","))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv)
+	binancePageDelay = time.Nanosecond
+	defer func() { binancePageDelay = time.Second }()
+
+	from := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	to := from.AddDate(5, 0, 0)
+	q, err := c.Binance(context.Background(), "BTCUSDT", from, to, Daily)
+	if err != nil {
+		t.Fatalf("Binance: %v", err)
+	}
+
+	if len(requests) != 2 {
+		t.Fatalf("made %d requests, want 2 (stop after a short page)", len(requests))
+	}
+	// The second request must resume 1ms past the last bar of the first page,
+	// not at from + 1000*interval computed from the request.
+	wantSecond := from.UnixMilli() + int64(binanceMaxBars-1)*day + 1
+	if requests[1] != wantSecond {
+		t.Errorf("second startTime = %d, want %d (last openTime + 1ms)", requests[1], wantSecond)
+	}
+
+	if len(q.Close) != binanceMaxBars+3 {
+		t.Fatalf("got %d bars, want %d", len(q.Close), binanceMaxBars+3)
+	}
+	// No duplicate and no gap at the page seam.
+	seam := q.Date[binanceMaxBars-1]
+	if got := q.Date[binanceMaxBars]; !got.Equal(seam.Add(24 * time.Hour)) {
+		t.Errorf("bar after the seam = %v, want %v", got, seam.Add(24*time.Hour))
+	}
+	for i := 1; i < len(q.Date); i++ {
+		if !q.Date[i].After(q.Date[i-1]) {
+			t.Fatalf("dates not strictly increasing at %d: %v then %v", i, q.Date[i-1], q.Date[i])
+		}
+	}
+}
+
+func TestBinanceIntervalRejectsUnsupported(t *testing.T) {
+	if _, err := binanceInterval(Period("nonsense")); err == nil {
+		t.Error("an unknown period should be rejected, not treated as daily")
+	}
+	// Every period this package defines maps to a Binance interval.
+	for _, name := range PeriodNames() {
+		p, err := ParsePeriod(name)
+		if err != nil {
+			t.Fatalf("ParsePeriod(%q): %v", name, err)
+		}
+		if _, err := binanceInterval(p); err != nil {
+			t.Errorf("binanceInterval(%q): %v", name, err)
+		}
+	}
+	if got, err := binanceInterval(Day3); err != nil || got != "3d" {
+		t.Errorf("Day3 = %q, %v, want 3d", got, err)
+	}
+	if got, err := binanceInterval(Hour6); err != nil || got != "6h" {
+		t.Errorf("Hour6 = %q, %v, want 6h (the removed code returned daily)", got, err)
 	}
 }

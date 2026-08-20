@@ -18,6 +18,17 @@ const (
 	defaultTiingoBaseURL   = "https://api.tiingo.com"
 	defaultCoinbaseBaseURL = "https://api.exchange.coinbase.com"
 	defaultNasdaqBaseURL   = "https://api.nasdaq.com"
+
+	// Binance market data comes from data-api.binance.vision, not
+	// api.binance.com. The latter returns HTTP 451 ("restricted location")
+	// from outside the regions Binance serves, including the US - which is
+	// why the original binance support, removed in 2024, had stopped working.
+	// binance.vision serves the same /api/v3 endpoints for public market data
+	// with no key and no geo restriction.
+	//
+	// api.binance.us is a different exchange with its own symbol universe, so
+	// it is not a drop-in replacement for this base URL.
+	defaultBinanceBaseURL = "https://data-api.binance.vision"
 )
 
 // defaultHTTPClient is shared by every Client that does not supply its own.
@@ -98,6 +109,7 @@ type Client struct {
 	tiingoBase   string
 	coinbaseBase string
 	nasdaqBase   string
+	binanceBase  string
 }
 
 // DefaultClient backs all package-level functions.
@@ -160,6 +172,13 @@ func (c *Client) nasdaqURL() string {
 		return c.nasdaqBase
 	}
 	return defaultNasdaqBaseURL
+}
+
+func (c *Client) binanceURL() string {
+	if c != nil && c.binanceBase != "" {
+		return c.binanceBase
+	}
+	return defaultBinanceBaseURL
 }
 
 // sleep pauses for d, returning early if ctx is cancelled.

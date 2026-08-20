@@ -8,6 +8,7 @@ go-quote is a Go library and CLI tool for downloading historical price quotes. I
 - Tiingo API (stocks, daily/intraday data) - requires TIINGO_API_TOKEN
 - Tiingo Crypto API (cryptocurrency data)
 - Coinbase API (cryptocurrency exchange data)
+- Binance API (cryptocurrency exchange data, via data-api.binance.vision)
 
 The project has no external dependencies beyond the Go standard library.
 
@@ -41,7 +42,7 @@ The library is one package (`quote`) at the repo root, split across topic files:
 | `period.go` | `ParsePeriod` and the period vocabulary |
 | `format.go` | `Format`, `ParseFormat`, `Encode`/`WriteFile` |
 | `encoding.go` | CSV/JSON/Highstock/Amibroker encoders and parsers |
-| `tiingo.go` / `coinbase.go` | data sources |
+| `tiingo.go` / `coinbase.go` / `binance.go` | data sources |
 | `market.go` / `ftp.go` | market symbol lists; anonymous FTP |
 | `update.go` | `UpdateFileTiingo` - in-place CSV updates with backfill |
 | `errors.go` / `fetchall.go` | `SymbolNotFoundError`; `FetchAll` |
@@ -94,13 +95,18 @@ Implementation uses two-pass approach:
 ### API Interactions
 - **Tiingo**: Uses Authorization header with token, supports date ranges and resample frequencies
 - **Coinbase**: Public API, fetches in 200-bar chunks with pagination
+- **Binance**: Public API, 1000-bar pages. The `limit` is clamped silently, so
+  paging resumes from the last bar returned, never from a computed window.
+  Uses `data-api.binance.vision`; `api.binance.com` returns 451 outside
+  eligible regions. A bad symbol is a 400 with `code:-1121`, not a 404
 - **NASDAQ API**: Fetches market screeners and symbol lists via JSON API
 - **FTP**: ETF list via anonymous FTP to ftp.nasdaqtrader.com
 
 ### Testing Strategy
 - quote_test.go: CSV/JSON encoders, parsers, period/format parsing, provider registry
 - client_test.go: provider HTTP paths via `httptest.Server`, using the unexported
-  `tiingoBase`/`coinbaseBase`/`nasdaqBase` fields on `Client` to redirect requests
+  `tiingoBase`/`coinbaseBase`/`nasdaqBase`/`binanceBase` fields on `Client` to
+  redirect requests
 - Update tests use `tiingoFetch` variable indirection for mocking
 - Tests use `t.TempDir()` for isolated file operations
 - Compatibility gate: `apidiff` against master must report no incompatible changes
@@ -112,6 +118,7 @@ rather than a silent fallback to daily:
 - Tiingo daily: d, w, m
 - Tiingo crypto: 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, d
 - Coinbase: 1m, 5m, 15m, 30m, 1h, d, w (mapped to granularity in seconds)
+- Binance: every period, including 3d - the only source that supports it
 
 ### Timezones
 All times this package produces are UTC. `time.Unix` and `time.Now` both

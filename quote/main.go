@@ -40,7 +40,7 @@ Options:
   -infile=<filename>   list of symbols to download
   -outfile=<filename>  output filename
   -period=<period>     1m|3m|5m|15m|30m|1h|2h|4h|6h|8h|12h|d|3d|w|m [default=d]
-  -source=<source>     tiingo|tiingo-crypto|coinbase [default=tiingo]
+  -source=<source>     tiingo|tiingo-crypto|coinbase|binance [default=tiingo]
   -token=<tiingo_tok>  tingo api token [default=TIINGO_API_TOKEN]
   -format=<format>     (csv|json|hs|ami) [default=csv]
   -all=<bool>          all in one file (true|false) [default=false]
@@ -349,13 +349,13 @@ func main() {
 	flag.IntVar(&flags.delay, "delay", 100, "milliseconds to delay between requests")
 	flag.StringVar(&flags.start, "start", "", "start date (yyyy[-mm[-dd]])")
 	flag.StringVar(&flags.end, "end", "", "end date (yyyy[-mm[-dd]])")
-	flag.StringVar(&flags.period, "period", "d", "1m|5m|15m|30m|1h|d")
-	flag.StringVar(&flags.source, "source", "tiingo", "tiingo|tiingo-crypto|coinbase")
+	flag.StringVar(&flags.period, "period", "d", "1m|3m|5m|15m|30m|1h|2h|4h|6h|8h|12h|d|3d|w|m")
+	flag.StringVar(&flags.source, "source", "tiingo", "tiingo|tiingo-crypto|coinbase|binance")
 	flag.StringVar(&flags.token, "token", os.Getenv("TIINGO_API_TOKEN"), "tiingo api token")
 	flag.StringVar(&flags.infile, "infile", "", "input filename")
 	flag.StringVar(&flags.outfile, "outfile", "", "output filename")
 	flag.StringVar(&flags.markets, "markets", "", "list of valid markets (comma separated)")
-	flag.StringVar(&flags.format, "format", "csv", "csv|json")
+	flag.StringVar(&flags.format, "format", "csv", "csv|json|hs|ami")
 	flag.StringVar(&flags.log, "log", "stdout", "<filename>|stdout")
 	flag.BoolVar(&flags.all, "all", false, "all output in one file")
 	flag.BoolVar(&flags.version, "v", false, "show version")

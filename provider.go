@@ -127,8 +127,24 @@ func (p coinbaseProvider) Fetch(ctx context.Context, req Request) (Quote, error)
 	return p.c.Coinbase(ctx, req.Symbol, req.From, req.To, req.Period)
 }
 
+type binanceProvider struct{ c *Client }
+
+func (p binanceProvider) Name() string { return "binance" }
+
+// Periods reports every period this package defines: Binance serves all of
+// them, and is the only source here that covers Day3.
+func (p binanceProvider) Periods() []Period {
+	return []Period{Min1, Min3, Min5, Min15, Min30, Min60, Hour2, Hour4, Hour6,
+		Hour8, Hour12, Daily, Day3, Weekly, Monthly}
+}
+
+func (p binanceProvider) Fetch(ctx context.Context, req Request) (Quote, error) {
+	return p.c.Binance(ctx, req.Symbol, req.From, req.To, req.Period)
+}
+
 func init() {
 	RegisterProvider("tiingo", func(c *Client) Provider { return tiingoProvider{c} })
 	RegisterProvider("tiingo-crypto", func(c *Client) Provider { return tiingoCryptoProvider{c} })
 	RegisterProvider("coinbase", func(c *Client) Provider { return coinbaseProvider{c} })
+	RegisterProvider("binance", func(c *Client) Provider { return binanceProvider{c} })
 }
