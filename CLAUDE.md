@@ -31,15 +31,29 @@ quote -help
 
 ### Core Components
 
-**quote.go** - Main library with ~1800 lines implementing:
-- `Quote` struct: Single symbol with Date/OHLCV slices
-- `Quotes` array: Multiple symbols
-- Data source functions: `NewQuoteFromTiingo()`, `NewQuoteFromTiingoCrypto()`, `NewQuoteFromCoinbase()`
-- CSV/JSON parsing and output: `NewQuoteFromCSV()`, `WriteCSV()`, `WriteJSON()`, etc.
-- Market list fetchers: `NewMarketList()`, `NewEtfList()` - downloads symbol lists from NASDAQ API and FTP
-- Update mode: `UpdateFileTiingo()` - in-place CSV updates with backfill
+The library is one package (`quote`) at the repo root, split across topic files:
 
-**quote/main.go** - CLI wrapper (~470 lines):
+| File | Contents |
+|---|---|
+| `quote.go` | `Quote`/`Quotes`/`Period` types, constants, `Log`, `Delay`, helpers |
+| `client.go` | `Client`, `DefaultClient`, shared HTTP transport, `RetryPolicy`, `HTTPError` |
+| `provider.go` | `Provider` interface, registry, the three built-in sources |
+| `period.go` | `ParsePeriod` and the period vocabulary |
+| `format.go` | `Format`, `ParseFormat`, `Encode`/`WriteFile` |
+| `encoding.go` | CSV/JSON/Highstock/Amibroker encoders and parsers |
+| `tiingo.go` / `coinbase.go` | data sources |
+| `market.go` / `ftp.go` | market symbol lists; anonymous FTP |
+| `update.go` | `UpdateFileTiingo` - in-place CSV updates with backfill |
+| `errors.go` / `fetchall.go` | `SymbolNotFoundError`; `FetchAll` |
+
+**Preferred API**: construct a `Client` and use `Client.Provider(name)` plus
+`Provider.Fetch(ctx, Request)`. The older package-level functions
+(`NewQuoteFromTiingo`, the `Write*` methods, `Delay`, `Log`) still work and
+delegate to `DefaultClient`, but are marked `// Deprecated:`. Adding a data
+source means implementing `Provider` and calling `RegisterProvider`; adding an
+output format means extending `Format`. Neither requires touching the CLI.
+
+**quote/main.go** - CLI wrapper (~425 lines):
 - Flag parsing for all options (years, period, source, format, etc.)
 - Symbol resolution from files, markets, or arguments (supports wildcards in -infile)
 - Two output modes: individual files per symbol or all-in-one file (-all=true)
@@ -54,7 +68,7 @@ quote -help
 
 ### Update Mode Architecture
 
-The `-update` flag enables incremental CSV updates for Tiingo data (quote.go:596-1064):
+The `-update` flag enables incremental CSV updates for Tiingo data (update.go):
 
 - **Single-symbol CSVs**: Infers symbol from filename (e.g., spy.csv → SPY)
 - **Multi-symbol CSVs**: Preserves original symbol order from input file
@@ -70,9 +84,12 @@ Implementation uses two-pass approach:
 ## Key Implementation Details
 
 ### Rate Limiting
-- `quote.Delay` (global variable) controls milliseconds between requests
-- CLI sets this via `-delay` flag (default 100ms)
+- `Client.Delay` is a real `time.Duration` and is the preferred control
+- The deprecated global `quote.Delay` holds a raw millisecond count despite its
+  `time.Duration` type (`Delay = 100` means 100ms); `Client.rateLimit` converts
+- CLI sets the global via `-delay` flag (default 100ms)
 - Update mode uses `time.Ticker` for global rate limiting across concurrent workers
+- `Client.Retry` adds backoff for 429/5xx; disabled by default
 
 ### API Interactions
 - **Tiingo**: Uses Authorization header with token, supports date ranges and resample frequencies
@@ -81,12 +98,17 @@ Implementation uses two-pass approach:
 - **FTP**: ETF list via anonymous FTP to ftp.nasdaqtrader.com
 
 ### Testing Strategy
-- quote_test.go contains unit tests for CSV parsing and update mode
+- quote_test.go: CSV/JSON encoders, parsers, period/format parsing, provider registry
+- client_test.go: provider HTTP paths via `httptest.Server`, using the unexported
+  `tiingoBase`/`coinbaseBase`/`nasdaqBase` fields on `Client` to redirect requests
 - Update tests use `tiingoFetch` variable indirection for mocking
 - Tests use `t.TempDir()` for isolated file operations
+- Compatibility gate: `apidiff` against master must report no incompatible changes
 
 ### Period Handling
-Period constants map user input to API parameters:
+`ParsePeriod` converts user input to a `Period`; each `Provider.Periods()`
+declares what that source supports, and an unsupported period is an error
+rather than a silent fallback to daily:
 - Tiingo daily: d, w, m
 - Tiingo crypto: 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, d
 - Coinbase: 1m, 5m, 15m, 30m, 1h, d, w (mapped to granularity in seconds)
