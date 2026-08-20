@@ -11,6 +11,7 @@ package quote
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,6 +49,8 @@ type Quotes []Quote
 type Period string
 
 // ClientTimeout - connect/read timeout for client requests
+//
+// Deprecated: set Client.HTTP with the timeout you want.
 const ClientTimeout = 10 * time.Second
 
 const (
@@ -84,10 +87,20 @@ const (
 )
 
 // Log - standard logger, disabled by default
+//
+// Deprecated: set Client.Log instead. This package-level logger is shared
+// mutable state; a Client carries its own.
 var Log *log.Logger
 
 // Delay - time delay in milliseconds between quote requests (default=100)
 // Be nice, don't get blocked
+//
+// Note the units: despite the time.Duration type this holds a raw
+// millisecond count, so Delay = 100 means 100ms. Client.Delay is an honest
+// duration instead.
+//
+// Deprecated: set Client.Delay instead. This is shared mutable state, read
+// without synchronization by the concurrent update workers.
 var Delay time.Duration
 
 func init() {
@@ -532,74 +545,84 @@ func NewQuotesFromJSONFile(filename string) (Quotes, error) {
 	return NewQuotesFromJSON(string(jsn))
 }
 
-func tiingoDaily(symbol string, from, to time.Time, period Period, token string) (Quote, error) {
-
-	type tquote struct {
-		AdjClose    float64 `json:"adjClose"`
-		AdjHigh     float64 `json:"adjHigh"`
-		AdjLow      float64 `json:"adjLow"`
-		AdjOpen     float64 `json:"adjOpen"`
-		AdjVolume   float64 `json:"adjVolume"`
-		Close       float64 `json:"close"`
-		Date        string  `json:"date"`
-		DivCash     float64 `json:"divCash"`
-		High        float64 `json:"high"`
-		Low         float64 `json:"low"`
-		Open        float64 `json:"open"`
-		SplitFactor float64 `json:"splitFactor"`
-		Volume      float64 `json:"volume"`
-	}
-
-	var tiingo []tquote
-
-	urlStr := fmt.Sprintf(
-		"https://api.tiingo.com/tiingo/daily/%s/prices?startDate=%s&endDate=%s",
-		strings.TrimSpace(strings.Replace(symbol, "/", "-", -1)),
+// tiingoDailyURL builds the Tiingo daily prices endpoint for a symbol.
+// Both the quote fetch and the update-mode raw fetch used to build this string
+// independently, with the same TrimSpace/slash-replacement dance.
+func (c *Client) tiingoDailyURL(symbol string, from, to time.Time, period Period) string {
+	u := fmt.Sprintf(
+		"%s/tiingo/daily/%s/prices?startDate=%s&endDate=%s",
+		c.tiingoURL(),
+		strings.TrimSpace(strings.ReplaceAll(symbol, "/", "-")),
 		url.QueryEscape(from.Format("2006-1-2")),
 		url.QueryEscape(to.Format("2006-1-2")))
 
-	if period == Weekly {
-		urlStr += "&resampleFreq=weekly"
-	} else if period == Monthly {
-		urlStr += "&resampleFreq=monthly"
+	switch period {
+	case Weekly:
+		u += "&resampleFreq=weekly"
+	case Monthly:
+		u += "&resampleFreq=monthly"
 	}
+	return u
+}
 
-	client := &http.Client{Timeout: ClientTimeout}
-	req, _ := http.NewRequest("GET", urlStr, nil)
-	req.Header.Set("Authorization", fmt.Sprintf("Token %s", token))
-	resp, err := client.Do(req)
+func tiingoAuthHeader(token string) http.Header {
+	h := http.Header{}
+	h.Set("Authorization", fmt.Sprintf("Token %s", token))
+	return h
+}
 
+// fetchTiingoDaily returns the raw Tiingo daily bars for a symbol.
+func (c *Client) fetchTiingoDaily(ctx context.Context, symbol string, from, to time.Time, period Period, token string) ([]tquoteRaw, error) {
+	body, err := c.get(ctx, c.tiingoDailyURL(symbol, from, to, period), tiingoAuthHeader(c.token(token)))
 	if err != nil {
-		Log.Printf("tiingo error: %v\n", err)
-		return NewQuote("", 0), err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusOK {
-		contents, _ := io.ReadAll(resp.Body)
-		err = json.Unmarshal(contents, &tiingo)
-		if err != nil {
-			Log.Printf("tiingo error: %v\n", err)
-			return NewQuote("", 0), err
+		if code, ok := statusCode(err); ok && code == http.StatusNotFound {
+			return nil, &SymbolNotFoundError{Symbol: symbol}
 		}
-	} else if resp.StatusCode == http.StatusNotFound {
-		Log.Printf("symbol '%s' not found\n", symbol)
+		return nil, err
+	}
+
+	var bars []tquoteRaw
+	if err := json.Unmarshal(body, &bars); err != nil {
+		return nil, fmt.Errorf("parsing tiingo daily json for %s: %w", symbol, err)
+	}
+	return bars, nil
+}
+
+// TiingoDaily returns Tiingo daily historical prices for a symbol.
+func (c *Client) TiingoDaily(ctx context.Context, symbol string, from, to time.Time, period Period, token string) (Quote, error) {
+	bars, err := c.fetchTiingoDaily(ctx, symbol, from, to, period, token)
+	if err != nil {
+		c.logger().Printf("tiingo error: %v\n", err)
 		return NewQuote("", 0), err
 	}
+	return quoteFromTiingoBars(symbol, bars), nil
+}
 
-	numrows := len(tiingo)
-	quote := NewQuote(symbol, numrows)
-
-	for bar := range numrows {
-		quote.Date[bar], _ = time.Parse("2006-01-02", tiingo[bar].Date[0:10])
-		quote.Open[bar] = tiingo[bar].AdjOpen
-		quote.High[bar] = tiingo[bar].AdjHigh
-		quote.Low[bar] = tiingo[bar].AdjLow
-		quote.Close[bar] = tiingo[bar].AdjClose
-		quote.Volume[bar] = float64(tiingo[bar].Volume)
+// quoteFromTiingoBars converts raw Tiingo bars into a Quote using adjusted prices.
+func quoteFromTiingoBars(symbol string, bars []tquoteRaw) Quote {
+	quote := NewQuote(symbol, len(bars))
+	for i, b := range bars {
+		quote.Date[i], _ = parseTiingoDate(b.Date)
+		quote.Open[i] = b.AdjOpen
+		quote.High[i] = b.AdjHigh
+		quote.Low[i] = b.AdjLow
+		quote.Close[i] = b.AdjClose
+		quote.Volume[i] = b.Volume
 	}
+	return quote
+}
 
-	return quote, nil
+// parseTiingoDate parses the leading YYYY-MM-DD of a Tiingo timestamp.
+// Slicing [0:10] unguarded panicked on a short or empty date field.
+func parseTiingoDate(s string) (time.Time, error) {
+	if len(s) < 10 {
+		return time.Time{}, fmt.Errorf("short tiingo date %q", s)
+	}
+	return time.Parse("2006-01-02", s[0:10])
+}
+
+func tiingoDaily(symbol string, from, to time.Time, period Period, token string) (Quote, error) {
+	return DefaultClient.TiingoDaily(context.Background(), symbol, from, to, period, token)
 }
 
 // UpdateFileTiingo updates an existing CSV (single or multi-symbol) in place using Tiingo daily data.
@@ -671,36 +694,10 @@ type tquoteRaw struct {
 }
 
 // fetchTiingoDailyRaw returns the raw daily records from Tiingo between [from, to].
+// Retained as the seam that update mode fetches through; it now shares the
+// URL building and transport with the quote path rather than duplicating both.
 func fetchTiingoDailyRaw(symbol string, from, to time.Time, token string) ([]tquoteRaw, error) {
-	var tiingo []tquoteRaw
-
-	urlStr := fmt.Sprintf(
-		"https://api.tiingo.com/tiingo/daily/%s/prices?startDate=%s&endDate=%s",
-		strings.TrimSpace(strings.Replace(symbol, "/", "-", -1)),
-		url.QueryEscape(from.Format("2006-1-2")),
-		url.QueryEscape(to.Format("2006-1-2")),
-	)
-
-	client := &http.Client{Timeout: ClientTimeout}
-	req, _ := http.NewRequest("GET", urlStr, nil)
-	req.Header.Set("Authorization", fmt.Sprintf("Token %s", token))
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusOK {
-		contents, _ := io.ReadAll(resp.Body)
-		if err := json.Unmarshal(contents, &tiingo); err != nil {
-			return nil, err
-		}
-		return tiingo, nil
-	}
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, &SymbolNotFoundError{Symbol: symbol}
-	}
-	return nil, fmt.Errorf("tiingo http status %d", resp.StatusCode)
+	return DefaultClient.fetchTiingoDaily(context.Background(), symbol, from, to, Daily, token)
 }
 
 // tiingoFetch is a package-level indirection for testing.
@@ -1106,101 +1103,114 @@ func updateMultiTiingo(path, header, token string, backfillDays int, fullRedownl
 	return os.Rename(tmp, path)
 }
 
-func tiingoCrypto(symbol string, from, to time.Time, period Period, token string) (Quote, error) {
+// tiingoCryptoPriceData is one crypto bar as returned by Tiingo.
+type tiingoCryptoPriceData struct {
+	TradesDone     float64 `json:"tradesDone"`
+	Close          float64 `json:"close"`
+	VolumeNotional float64 `json:"volumeNotional"`
+	Low            float64 `json:"low"`
+	Open           float64 `json:"open"`
+	Date           string  `json:"date"` // "2017-12-19T00:00:00Z"
+	High           float64 `json:"high"`
+	Volume         float64 `json:"volume"`
+}
 
-	resampleFreq := "1day"
+type tiingoCryptoData struct {
+	Ticker        string                  `json:"ticker"`
+	BaseCurrency  string                  `json:"baseCurrency"`
+	QuoteCurrency string                  `json:"quoteCurrency"`
+	PriceData     []tiingoCryptoPriceData `json:"priceData"`
+}
+
+// tiingoCryptoResampleFreq maps a Period to Tiingo's crypto resampleFreq.
+// Unsupported periods report an error rather than silently returning daily
+// bars, which is what the old switch default did.
+func tiingoCryptoResampleFreq(period Period) (string, error) {
 	switch period {
 	case Min1:
-		resampleFreq = "1min"
+		return "1min", nil
 	case Min3:
-		resampleFreq = "3min"
+		return "3min", nil
 	case Min5:
-		resampleFreq = "5min"
+		return "5min", nil
 	case Min15:
-		resampleFreq = "15min"
+		return "15min", nil
 	case Min30:
-		resampleFreq = "30min"
+		return "30min", nil
 	case Min60:
-		resampleFreq = "1hour"
+		return "1hour", nil
 	case Hour2:
-		resampleFreq = "2hour"
+		return "2hour", nil
 	case Hour4:
-		resampleFreq = "4hour"
+		return "4hour", nil
 	case Hour6:
-		resampleFreq = "6hour"
+		return "6hour", nil
 	case Hour8:
-		resampleFreq = "8hour"
+		return "8hour", nil
 	case Hour12:
-		resampleFreq = "12hour"
-	case Daily:
-		resampleFreq = "1day"
+		return "12hour", nil
+	case Daily, "":
+		return "1day", nil
+	}
+	return "", fmt.Errorf("period %q is not supported by tiingo-crypto", period)
+}
+
+// TiingoCrypto returns Tiingo crypto historical prices for a symbol.
+func (c *Client) TiingoCrypto(ctx context.Context, symbol string, from, to time.Time, period Period, token string) (Quote, error) {
+	resampleFreq, err := tiingoCryptoResampleFreq(period)
+	if err != nil {
+		return NewQuote("", 0), err
 	}
 
-	type priceData struct {
-		TradesDone     float64 `json:"tradesDone"`
-		Close          float64 `json:"close"`
-		VolumeNotional float64 `json:"volumeNotional"`
-		Low            float64 `json:"low"`
-		Open           float64 `json:"open"`
-		Date           string  `json:"date"` // "2017-12-19T00:00:00Z"
-		High           float64 `json:"high"`
-		Volume         float64 `json:"volume"`
-	}
-
-	type cryptoData struct {
-		Ticker        string      `json:"ticker"`
-		BaseCurrency  string      `json:"baseCurrency"`
-		QuoteCurrency string      `json:"quoteCurrency"`
-		PriceData     []priceData `json:"priceData"`
-	}
-
-	var crypto []cryptoData
-
-	url := fmt.Sprintf(
-		"https://api.tiingo.com/tiingo/crypto/prices?tickers=%s&startDate=%s&endDate=%s&resampleFreq=%s",
-		symbol,
+	reqURL := fmt.Sprintf(
+		"%s/tiingo/crypto/prices?tickers=%s&startDate=%s&endDate=%s&resampleFreq=%s",
+		c.tiingoURL(),
+		url.QueryEscape(symbol),
 		url.QueryEscape(from.Format("2006-1-2")),
 		url.QueryEscape(to.Format("2006-1-2")),
 		resampleFreq)
 
-	client := &http.Client{Timeout: ClientTimeout}
-	req, _ := http.NewRequest("GET", url, nil)
-	req.Header.Set("Authorization", fmt.Sprintf("Token %s", token))
-	resp, err := client.Do(req)
-
+	body, err := c.get(ctx, reqURL, tiingoAuthHeader(c.token(token)))
 	if err != nil {
-		Log.Printf("symbol '%s' not found\n", symbol)
+		if code, ok := statusCode(err); ok && code == http.StatusNotFound {
+			err = &SymbolNotFoundError{Symbol: symbol}
+		}
+		c.logger().Printf("tiingo crypto symbol '%s' error: %v\n", symbol, err)
 		return NewQuote("", 0), err
 	}
-	defer resp.Body.Close()
 
-	contents, _ := io.ReadAll(resp.Body)
-	err = json.Unmarshal(contents, &crypto)
-	if err != nil {
-		Log.Printf("tiingo crypto symbol '%s' error: %v\n", symbol, err)
-		return NewQuote("", 0), err
+	var crypto []tiingoCryptoData
+	if err := json.Unmarshal(body, &crypto); err != nil {
+		c.logger().Printf("tiingo crypto symbol '%s' error: %v\n", symbol, err)
+		return NewQuote("", 0), fmt.Errorf("parsing tiingo crypto json for %s: %w", symbol, err)
 	}
 	if len(crypto) < 1 {
-		Log.Printf("tiingo crypto symbol '%s' No data returned", symbol)
-		return NewQuote("", 0), err
+		// Previously this returned a nil error, so a symbol with no data was
+		// indistinguishable from a successful empty fetch.
+		c.logger().Printf("tiingo crypto symbol '%s' no data returned\n", symbol)
+		return NewQuote("", 0), &SymbolNotFoundError{Symbol: symbol}
 	}
 
-	numrows := len(crypto[0].PriceData)
-	quote := NewQuote(symbol, numrows)
-
-	for bar := range numrows {
-		quote.Date[bar], _ = time.Parse(time.RFC3339, crypto[0].PriceData[bar].Date)
-		quote.Open[bar] = crypto[0].PriceData[bar].Open
-		quote.High[bar] = crypto[0].PriceData[bar].High
-		quote.Low[bar] = crypto[0].PriceData[bar].Low
-		quote.Close[bar] = crypto[0].PriceData[bar].Close
-		quote.Volume[bar] = float64(crypto[0].PriceData[bar].Volume)
+	bars := crypto[0].PriceData
+	quote := NewQuote(symbol, len(bars))
+	for i, b := range bars {
+		quote.Date[i], _ = time.Parse(time.RFC3339, b.Date)
+		quote.Open[i] = b.Open
+		quote.High[i] = b.High
+		quote.Low[i] = b.Low
+		quote.Close[i] = b.Close
+		quote.Volume[i] = b.Volume
 	}
-
 	return quote, nil
 }
 
+func tiingoCrypto(symbol string, from, to time.Time, period Period, token string) (Quote, error) {
+	return DefaultClient.TiingoCrypto(context.Background(), symbol, from, to, period, token)
+}
+
 // NewQuoteFromTiingo - Tiingo daily historical prices for a symbol
+//
+// Deprecated: use Client.TiingoDaily, which takes a context.Context.
 func NewQuoteFromTiingo(symbol, startDate, endDate string, period Period, token string) (Quote, error) {
 
 	from := ParseDateString(startDate)
@@ -1210,6 +1220,8 @@ func NewQuoteFromTiingo(symbol, startDate, endDate string, period Period, token 
 }
 
 // NewQuoteFromTiingoCrypto - Tiingo crypto historical prices for a symbol
+//
+// Deprecated: use Client.TiingoCrypto, which takes a context.Context.
 func NewQuoteFromTiingoCrypto(symbol, startDate, endDate string, period Period, token string) (Quote, error) {
 
 	from := ParseDateString(startDate)
@@ -1218,124 +1230,77 @@ func NewQuoteFromTiingoCrypto(symbol, startDate, endDate string, period Period, 
 	return tiingoCrypto(symbol, from, to, period, token)
 }
 
-// NewQuotesFromTiingoSyms - create a list of prices from symbols in string array
-func NewQuotesFromTiingoSyms(symbols []string, startDate, endDate string, period Period, token string) (Quotes, error) {
-
-	quotes := Quotes{}
-	for _, symbol := range symbols {
-		quote, err := NewQuoteFromTiingo(symbol, startDate, endDate, period, token)
-		if err == nil {
-			quotes = append(quotes, quote)
-		} else {
-			Log.Println("error downloading " + symbol)
-		}
-		time.Sleep(Delay * time.Millisecond)
-	}
-	return quotes, nil
-}
-
-// NewQuotesFromTiingoCryptoSyms - create a list of prices from symbols in string array
-func NewQuotesFromTiingoCryptoSyms(symbols []string, startDate, endDate string, period Period, token string) (Quotes, error) {
-
-	quotes := Quotes{}
-	for _, symbol := range symbols {
-		quote, err := NewQuoteFromTiingoCrypto(symbol, startDate, endDate, period, token)
-		if err == nil {
-			quotes = append(quotes, quote)
-		} else {
-			Log.Println("error downloading " + symbol)
-		}
-		time.Sleep(Delay * time.Millisecond)
-	}
-	return quotes, nil
-}
-
-// NewQuoteFromCoinbase - Coinbase Pro historical prices for a symbol
-func NewQuoteFromCoinbase(symbol, startDate, endDate string, period Period) (Quote, error) {
-
-	start := ParseDateString(startDate) //.In(time.Now().Location())
-	end := ParseDateString(endDate)     //.In(time.Now().Location())
-
-	var granularity int // seconds
-
+// coinbaseGranularity maps a Period to Coinbase's granularity in seconds.
+// Periods Coinbase does not support report an error instead of silently
+// falling back to daily bars, which is what the old switch default did.
+func coinbaseGranularity(period Period) (int, error) {
 	switch period {
 	case Min1:
-		granularity = 60
+		return 60, nil
 	case Min5:
-		granularity = 5 * 60
+		return 5 * 60, nil
 	case Min15:
-		granularity = 15 * 60
+		return 15 * 60, nil
 	case Min30:
-		granularity = 30 * 60
+		return 30 * 60, nil
 	case Min60:
-		granularity = 60 * 60
-	case Daily:
-		granularity = 24 * 60 * 60
+		return 60 * 60, nil
+	case Daily, "":
+		return 24 * 60 * 60, nil
 	case Weekly:
-		granularity = 7 * 24 * 60 * 60
-	default:
-		granularity = 24 * 60 * 60
+		return 7 * 24 * 60 * 60, nil
+	}
+	return 0, fmt.Errorf("period %q is not supported by coinbase", period)
+}
+
+// coinbasePageDelay is the pause between Coinbase candle pages.
+var coinbasePageDelay = time.Second
+
+// Coinbase returns Coinbase historical prices for a symbol, paging through the
+// 200-bar limit imposed by the candles endpoint.
+func (c *Client) Coinbase(ctx context.Context, symbol string, start, end time.Time, period Period) (Quote, error) {
+	granularity, err := coinbaseGranularity(period)
+	if err != nil {
+		return NewQuote("", 0), err
 	}
 
 	var quote Quote
 	quote.Symbol = symbol
 
-	maxBars := 200
-	var step = time.Second * time.Duration(granularity)
+	const maxBars = 200
+	step := time.Second * time.Duration(granularity)
 
 	startBar := start
-	endBar := startBar.Add(time.Duration(maxBars) * step)
-
+	endBar := startBar.Add(maxBars * step)
 	if endBar.After(end) {
 		endBar = end
 	}
 
-	//Log.Printf("startBar=%v, endBar=%v\n", startBar, endBar)
-
-	// One client for the whole paging run: a per-iteration client defeats
-	// connection pooling and leaks a transport per page.
-	client := &http.Client{Timeout: ClientTimeout}
-
 	for startBar.Before(end) {
-
 		reqURL := fmt.Sprintf(
-			"https://api.exchange.coinbase.com/products/%s/candles?start=%s&end=%s&granularity=%d",
-			symbol,
+			"%s/products/%s/candles?start=%s&end=%s&granularity=%d",
+			c.coinbaseURL(),
+			url.PathEscape(symbol),
 			url.QueryEscape(startBar.Format(time.RFC3339)),
 			url.QueryEscape(endBar.Format(time.RFC3339)),
 			granularity)
 
-		req, err := http.NewRequest("GET", reqURL, nil)
+		body, err := c.get(ctx, reqURL, nil)
 		if err != nil {
-			return NewQuote("", 0), err
-		}
-		resp, err := client.Do(req)
-
-		if err != nil {
-			Log.Printf("coinbase error: %v\n", err)
+			c.logger().Printf("coinbase error: %v\n", err)
 			return NewQuote("", 0), err
 		}
 
-		contents, err := io.ReadAll(resp.Body)
-		// Close per iteration; a deferred close here would hold every page's
-		// body open until the whole backfill finished.
-		resp.Body.Close()
-		if err != nil {
-			return NewQuote("", 0), err
-		}
-
+		// Coinbase returns [time, low, high, open, close, volume] tuples.
 		type cb [6]float64
 		var bars []cb
-		if err = json.Unmarshal(contents, &bars); err != nil {
-			Log.Printf("coinbase error: %v\n", err)
+		if err := json.Unmarshal(body, &bars); err != nil {
+			c.logger().Printf("coinbase error: %v\n", err)
 			return NewQuote("", 0), fmt.Errorf("parsing coinbase candles for %s: %w", symbol, err)
 		}
 
 		numrows := len(bars)
 		q := NewQuote(symbol, numrows)
-
-		//Log.Printf("numrows=%d, bars=%v\n", numrows, bars)
-
 		for row := range numrows {
 			bar := numrows - 1 - row // reverse the order
 			q.Date[bar] = time.Unix(int64(bars[row][0]), 0)
@@ -1352,54 +1317,108 @@ func NewQuoteFromCoinbase(symbol, startDate, endDate string, period Period) (Quo
 		quote.Close = append(quote.Close, q.Close...)
 		quote.Volume = append(quote.Volume, q.Volume...)
 
-		time.Sleep(time.Second)
 		startBar = endBar.Add(step)
-		endBar = startBar.Add(time.Duration(maxBars) * step)
+		endBar = startBar.Add(maxBars * step)
 
+		if startBar.Before(end) {
+			// Coinbase is unauthenticated and rate limited; pause between pages.
+			if err := sleep(ctx, coinbasePageDelay); err != nil {
+				return quote, err
+			}
+		}
 	}
 
 	return quote, nil
 }
 
-// NewQuotesFromCoinbase - create a list of prices from symbols in file
-func NewQuotesFromCoinbase(filename, startDate, endDate string, period Period) (Quotes, error) {
+// FetchFunc fetches one symbol. FetchAll drives it across a symbol list.
+type FetchFunc func(ctx context.Context, symbol string) (Quote, error)
 
+// FetchAll fetches every symbol in order, pausing Client.Delay between
+// requests and skipping symbols that fail. It replaces four copies of the
+// same append/log/sleep loop, one per data source.
+func (c *Client) FetchAll(ctx context.Context, symbols []string, fetch FetchFunc) (Quotes, error) {
 	quotes := Quotes{}
-	inFile, err := os.Open(filename)
-	if err != nil {
-		return quotes, err
-	}
-	defer inFile.Close()
-	scanner := bufio.NewScanner(inFile)
-	scanner.Split(bufio.ScanLines)
-
-	for scanner.Scan() {
-		sym := scanner.Text()
-		quote, err := NewQuoteFromCoinbase(sym, startDate, endDate, period)
-		if err == nil {
-			quotes = append(quotes, quote)
-		} else {
-			Log.Println("error downloading " + sym)
+	for i, symbol := range symbols {
+		if i > 0 {
+			if err := sleep(ctx, c.rateLimit()); err != nil {
+				return quotes, err
+			}
 		}
-		time.Sleep(Delay * time.Millisecond)
+		quote, err := fetch(ctx, symbol)
+		if err != nil {
+			c.logger().Println("error downloading " + symbol)
+			continue
+		}
+		quotes = append(quotes, quote)
+	}
+	if err := ctx.Err(); err != nil {
+		return quotes, err
 	}
 	return quotes, nil
 }
 
-// NewQuotesFromCoinbaseSyms - create a list of prices from symbols in string array
-func NewQuotesFromCoinbaseSyms(symbols []string, startDate, endDate string, period Period) (Quotes, error) {
+// TiingoDailySyms fetches Tiingo daily prices for a list of symbols.
+func (c *Client) TiingoDailySyms(ctx context.Context, symbols []string, from, to time.Time, period Period, token string) (Quotes, error) {
+	return c.FetchAll(ctx, symbols, func(ctx context.Context, symbol string) (Quote, error) {
+		return c.TiingoDaily(ctx, symbol, from, to, period, token)
+	})
+}
 
-	quotes := Quotes{}
-	for _, symbol := range symbols {
-		quote, err := NewQuoteFromCoinbase(symbol, startDate, endDate, period)
-		if err == nil {
-			quotes = append(quotes, quote)
-		} else {
-			Log.Println("error downloading " + symbol)
-		}
-		time.Sleep(Delay * time.Millisecond)
+// TiingoCryptoSyms fetches Tiingo crypto prices for a list of symbols.
+func (c *Client) TiingoCryptoSyms(ctx context.Context, symbols []string, from, to time.Time, period Period, token string) (Quotes, error) {
+	return c.FetchAll(ctx, symbols, func(ctx context.Context, symbol string) (Quote, error) {
+		return c.TiingoCrypto(ctx, symbol, from, to, period, token)
+	})
+}
+
+// CoinbaseSyms fetches Coinbase prices for a list of symbols.
+func (c *Client) CoinbaseSyms(ctx context.Context, symbols []string, from, to time.Time, period Period) (Quotes, error) {
+	return c.FetchAll(ctx, symbols, func(ctx context.Context, symbol string) (Quote, error) {
+		return c.Coinbase(ctx, symbol, from, to, period)
+	})
+}
+
+// NewQuotesFromTiingoSyms - create a list of prices from symbols in string array
+//
+// Deprecated: use Client.TiingoDailySyms.
+func NewQuotesFromTiingoSyms(symbols []string, startDate, endDate string, period Period, token string) (Quotes, error) {
+	return DefaultClient.TiingoDailySyms(context.Background(), symbols,
+		ParseDateString(startDate), ParseDateString(endDate), period, token)
+}
+
+// NewQuotesFromTiingoCryptoSyms - create a list of prices from symbols in string array
+//
+// Deprecated: use Client.TiingoCryptoSyms.
+func NewQuotesFromTiingoCryptoSyms(symbols []string, startDate, endDate string, period Period, token string) (Quotes, error) {
+	return DefaultClient.TiingoCryptoSyms(context.Background(), symbols,
+		ParseDateString(startDate), ParseDateString(endDate), period, token)
+}
+
+// NewQuoteFromCoinbase - Coinbase historical prices for a symbol
+//
+// Deprecated: use Client.Coinbase, which takes a context.Context.
+func NewQuoteFromCoinbase(symbol, startDate, endDate string, period Period) (Quote, error) {
+	start := ParseDateString(startDate)
+	end := ParseDateString(endDate)
+	return DefaultClient.Coinbase(context.Background(), symbol, start, end, period)
+}
+
+// NewQuotesFromCoinbase - create a list of prices from symbols in file
+func NewQuotesFromCoinbase(filename, startDate, endDate string, period Period) (Quotes, error) {
+	symbols, err := NewSymbolsFromFile(filename)
+	if err != nil {
+		return Quotes{}, err
 	}
-	return quotes, nil
+	return NewQuotesFromCoinbaseSyms(symbols, startDate, endDate, period)
+}
+
+// NewQuotesFromCoinbaseSyms - create a list of prices from symbols in string array
+//
+// Deprecated: use Client.CoinbaseSyms.
+func NewQuotesFromCoinbaseSyms(symbols []string, startDate, endDate string, period Period) (Quotes, error) {
+	return DefaultClient.CoinbaseSyms(context.Background(), symbols,
+		ParseDateString(startDate), ParseDateString(endDate), period)
 }
 
 // NewEtfList - download a list of etf symbols to an array of strings
@@ -1484,6 +1503,9 @@ func MarketRequiresToken(market string) bool {
 	return strings.HasPrefix(market, "tiingo")
 }
 
+// marketListUserAgent identifies go-quote to the NASDAQ API.
+const marketListUserAgent = "markcheno/go-quote"
+
 // NewMarketList - download a list of market symbols to an array of strings
 func NewMarketList(market string) ([]string, error) {
 
@@ -1560,20 +1582,18 @@ func NewMarketList(market string) ([]string, error) {
 		return symbols, fmt.Errorf("no source configured for market %q", market)
 	}
 
-	req, _ := http.NewRequest("GET", url, nil)
-	req.Header.Add("User-Agent", "markcheno/go-quote")
-	req.Header.Add("Accept", "application/json")
-	req.Header.Add("Content-Type", "application/json; charset=utf-8")
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	// This call site previously used a bare &http.Client{} with no timeout at
+	// all, so a hung NASDAQ response blocked forever.
+	header := http.Header{}
+	header.Set("User-Agent", marketListUserAgent)
+	header.Set("Accept", "application/json")
+	header.Set("Content-Type", "application/json; charset=utf-8")
+
+	body, err := DefaultClient.get(context.Background(), url, header)
 	if err != nil {
 		return symbols, err
 	}
-	defer resp.Body.Close()
-
-	buf := new(bytes.Buffer)
-	buf.ReadFrom(resp.Body)
-	newStr := buf.String()
+	newStr := string(body)
 
 	if strings.HasPrefix(market, "tiingo") {
 		return getTiingoCryptoMarket(market, newStr)
