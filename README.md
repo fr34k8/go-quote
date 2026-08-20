@@ -6,6 +6,8 @@ A free quote downloader library and cli
 
 Downloads daily historical price quotes from Tiingo and daily/intraday data from various api's. Written in pure Go. No external dependencies. Now downloads crypto coin historical data from various exchanges.
 
+- Update: 08/19/2026 - Modernization: added `Client` (context, retries, shared HTTP client) and a `Provider` registry; split the library into topic files; requires Go 1.24+. Fixes: EUR/GBP-quoted Coinbase pairs were rounded to 2 decimals and lost their price data, all timestamps are now UTC, `-markets=etf` works from the library API, multi-symbol CSV parsing no longer scrambles symbols, and CSV round-trips no longer append a phantom zero bar. Existing API is unchanged; older entry points still work and are marked deprecated
+
 - Update: 09/04/2025 - added Tiingo CSV update mode (-update) with 10-day backfill, optional full re-download on corporate actions, and -concurrency for faster updates
 
 - Update: 04/01/2025 - added markets flag, wildcard input files, multiple inputs
@@ -36,7 +38,7 @@ Downloads daily historical price quotes from Tiingo and daily/intraday data from
 
 Still very much in alpha mode. Expect bugs and API changes. Comments/suggestions/pull requests welcome!
 
-Copyright 2024 Mark Chenoweth
+Copyright 2025 Mark Chenoweth
 
 Install CLI utility (quote) with:
 
@@ -48,10 +50,10 @@ go install github.com/markcheno/go-quote/quote@latest
 Usage:
   quote -h | -help
   quote -v | -version
-  quote <market> [-output=<outputFile>]
+  quote [-outfile=<outputFile>] <market>
   quote -markets=<markets> -all=true -outfile=stocks.csv
   quote [-years=<years>|(-start=<datestr> [-end=<datestr>])] [options] [-infile=<filename>|<symbol> ...]
-  quote -update=<path> [-end=<datestr>] [-backfill-days=10] [-full-redownload-on-ca] [-concurrency=<n>] [-token=<tiingo_token>]
+  quote -update=<path> [-end=<datestr>] [-backfill-days=<n>] [-full-redownload-on-ca] [-concurrency=<n>] [-token=<tiingo_token>]
 
 Options:
   -h -help             show help
@@ -59,8 +61,8 @@ Options:
   -years=<years>       number of years to download [default=5]
   -start=<datestr>     yyyy[-[mm-[dd]]]
   -end=<datestr>       yyyy[-[mm-[dd]]] [default=today]
+  -markets=<list>      list of valid markets to download (comma separated)
   -infile=<filename>   list of symbols to download
-  -markets=<list>      list of markets to download (comma separated)
   -outfile=<filename>  output filename
   -period=<period>     1m|3m|5m|15m|30m|1h|2h|4h|6h|8h|12h|d|3d|w|m [default=d]
   -source=<source>     tiingo|tiingo-crypto|coinbase [default=tiingo]
@@ -79,7 +81,7 @@ Note: not all periods work with all sources
 Valid markets:
 etf,nasdaq,nasdaq100,amex,nyse,megacap,largecap,midcap,smallcap,microcap,nanocap,
 telecommunications,health_care,finance,real_estate,consumer_discretionary,
-consumer_staples,industrials,basic_materials,energy,utilities
+consumer_staples,industrials,basic_materials,energy,utilities,technology
 coinbase,tiingo-usd,tiingo-btc,tiingo-eth
 ```
 
@@ -131,7 +133,7 @@ Tiingo rate limit guidance
 
 ## Install library
 
-Install the package with:
+Requires Go 1.24 or later. Install the package with:
 
 ```bash
 go get github.com/markcheno/go-quote@latest
@@ -155,6 +157,102 @@ func main() {
 	fmt.Println(rsi2)
 }
 ```
+
+### Using a Client
+
+The package-level functions above still work, but new code should prefer a
+`Client`. It takes a `context.Context`, so requests can be cancelled or given a
+deadline, and it lets you set the request delay, retry policy, and HTTP client
+per caller instead of through package globals:
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/markcheno/go-quote"
+)
+
+func main() {
+	c := &quote.Client{
+		Token: "your-tiingo-token",
+		Delay: 250 * time.Millisecond,
+		Retry: quote.RetryPolicy{Max: 3}, // backs off on 429 and 5xx
+	}
+
+	p, err := c.Provider("tiingo") // or "tiingo-crypto", "coinbase"
+	if err != nil {
+		panic(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	spy, err := p.Fetch(ctx, quote.Request{
+		Symbol: "spy",
+		From:   quote.ParseDateString("2016-01-01"),
+		To:     quote.ParseDateString("2016-04-01"),
+		Period: quote.Daily,
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Print(spy.CSV())
+}
+```
+
+Fetch many symbols with `Client.FetchSymbols`, which paces requests by
+`Client.Delay` and skips symbols that fail:
+
+```go
+quotes, err := c.FetchSymbols(ctx, p, []string{"spy", "qqq", "dia"}, quote.Request{
+	From:   quote.ParseDateString("2024-01-01"),
+	To:     quote.ParseDateString("2024-12-31"),
+	Period: quote.Daily,
+})
+if err != nil {
+	panic(err)
+}
+err = quotes.WriteFile("indexes.csv", quote.FormatCSV)
+```
+
+`Client.Provider` reports the valid sources and `Provider.Periods` the periods
+each one supports, so an unsupported combination is an error rather than a
+silent fallback to daily bars.
+
+## Notes
+
+**Timestamps are UTC.** Every source returns UTC, so a Coinbase file and a
+Tiingo file label the same instant identically. The CSV format carries no
+timezone, so this also means a file written and read back keeps its instants.
+
+**Decimal places** come from the data source: 2 for equities, 8 for
+cryptocurrencies, recorded in `Quote.Precision`. CSV parsing infers it from the
+decimals present in the file, so reading a file and writing it out again does
+not round it.
+
+**Adding a data source** means implementing `quote.Provider` and calling
+`quote.RegisterProvider`; the CLI picks it up from the registry with no further
+changes.
+
+## Upgrading
+
+Three changes need attention if you have existing data or scripts:
+
+- **EUR/GBP-quoted Coinbase pairs** (`DOGE-EUR`, `ADA-GBP`, and ~48 others) were
+  written with 2 decimal places, which rounded sub-euro prices away entirely -
+  a full day of `DOGE-EUR` came out as `0.08,0.08,0.08,0.08`. The data in those
+  files is gone and needs refetching, not reformatting.
+- **Coinbase timestamps** were written in local time and are now UTC. If you are
+  not in UTC they will shift by your offset, so refetch whole ranges rather than
+  diffing old files against new ones. Tiingo files are unaffected - they were
+  already UTC.
+- **The CLI now exits 1** on a bad flag instead of 0. A script written as
+  `quote -source=bogus && next-step` will now stop where it used to continue.
 
 ## License
 
