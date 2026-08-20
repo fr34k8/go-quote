@@ -597,3 +597,158 @@ func TestParseDateString(t *testing.T) {
 		_ = ParseDateString("2018-07-12 00:00:00")
 	})
 }
+
+// --- Phase 3: provider registry, period and format parsing ---
+
+func TestParsePeriod(t *testing.T) {
+	cases := []struct {
+		in   string
+		want Period
+	}{
+		{"d", Daily}, {"1d", Daily}, {"w", Weekly}, {"1w", Weekly},
+		{"m", Monthly}, {"1M", Monthly}, {"1m", Min1}, {"5m", Min5},
+		{"1h", Min60}, {"12h", Hour12}, {"3d", Day3},
+	}
+	for _, tc := range cases {
+		got, err := ParsePeriod(tc.in)
+		if err != nil {
+			t.Errorf("ParsePeriod(%q): %v", tc.in, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("ParsePeriod(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	// An unknown period must error rather than silently becoming Daily.
+	if _, err := ParsePeriod("7y"); err == nil {
+		t.Error("ParsePeriod(7y) should fail, not default to Daily")
+	}
+}
+
+func TestParseFormat(t *testing.T) {
+	for _, s := range []string{"csv", "json", "hs", "ami"} {
+		if _, err := ParseFormat(s); err != nil {
+			t.Errorf("ParseFormat(%q): %v", s, err)
+		}
+	}
+	// An unknown format previously fell through every if/else and wrote
+	// nothing while reporting success.
+	if _, err := ParseFormat("xlsx"); err == nil {
+		t.Error("ParseFormat(xlsx) should fail")
+	}
+}
+
+func TestProviderRegistry(t *testing.T) {
+	want := []string{"coinbase", "tiingo", "tiingo-crypto"}
+	got := ProviderNames()
+	if len(got) != len(want) {
+		t.Fatalf("ProviderNames() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("ProviderNames()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+	if _, err := DefaultClient.Provider("nope"); err == nil {
+		t.Error("Provider(nope) should fail")
+	}
+}
+
+// Each provider must reject periods it cannot serve, rather than returning
+// wrong-resolution data.
+func TestProviderPeriodValidation(t *testing.T) {
+	cases := []struct {
+		source string
+		period Period
+		ok     bool
+	}{
+		{"tiingo", Daily, true},
+		{"tiingo", Weekly, true},
+		{"tiingo", Min5, false},
+		{"tiingo-crypto", Min15, true},
+		{"tiingo-crypto", Weekly, false},
+		{"coinbase", Min5, true},
+		{"coinbase", Hour6, false},
+	}
+	for _, tc := range cases {
+		p, err := DefaultClient.Provider(tc.source)
+		if err != nil {
+			t.Fatalf("Provider(%q): %v", tc.source, err)
+		}
+		err = CheckPeriod(p, tc.period)
+		if tc.ok && err != nil {
+			t.Errorf("%s should accept %q: %v", tc.source, tc.period, err)
+		}
+		if !tc.ok && err == nil {
+			t.Errorf("%s should reject %q", tc.source, tc.period)
+		}
+	}
+}
+
+func TestWriteFileDefaultNames(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	q := testQuote("spy", 2)
+	for _, tc := range []struct {
+		format Format
+		want   string
+	}{
+		{FormatCSV, "spy.csv"},
+		{FormatJSON, "spy.json"},
+		{FormatHighstock, "spy.json"},
+		{FormatAmibroker, "spy.csv"},
+	} {
+		if err := q.WriteFile("", tc.format); err != nil {
+			t.Fatalf("WriteFile(%q): %v", tc.format, err)
+		}
+		if _, err := os.Stat(tc.want); err != nil {
+			t.Errorf("format %q did not create %s: %v", tc.format, tc.want, err)
+		}
+	}
+
+	qs := Quotes{q}
+	if err := qs.WriteFile("", FormatCSV); err != nil {
+		t.Fatalf("Quotes.WriteFile: %v", err)
+	}
+	if _, err := os.Stat("quotes.csv"); err != nil {
+		t.Errorf("Quotes.WriteFile did not create quotes.csv: %v", err)
+	}
+
+	if err := q.WriteFile("", Format("bogus")); err == nil {
+		t.Error("WriteFile with an invalid format should fail")
+	}
+}
+
+// WriteFile must produce byte-identical output to the deprecated per-format
+// methods it replaces.
+func TestWriteFileMatchesLegacyMethods(t *testing.T) {
+	q := testQuote("spy", 3)
+	qs := Quotes{testQuote("spy", 3), testQuote("aapl", 2)}
+
+	for _, tc := range []struct {
+		name   string
+		format Format
+		legacy string
+		modern func() (string, error)
+	}{
+		{"quote csv", FormatCSV, q.CSV(), func() (string, error) { return q.Encode(FormatCSV) }},
+		{"quote json", FormatJSON, q.JSON(false), func() (string, error) { return q.Encode(FormatJSON) }},
+		{"quote hs", FormatHighstock, q.Highstock(), func() (string, error) { return q.Encode(FormatHighstock) }},
+		{"quote ami", FormatAmibroker, q.Amibroker(), func() (string, error) { return q.Encode(FormatAmibroker) }},
+		{"quotes csv", FormatCSV, qs.CSV(), func() (string, error) { return qs.Encode(FormatCSV) }},
+		{"quotes json", FormatJSON, qs.JSON(false), func() (string, error) { return qs.Encode(FormatJSON) }},
+		{"quotes hs", FormatHighstock, qs.Highstock(), func() (string, error) { return qs.Encode(FormatHighstock) }},
+		{"quotes ami", FormatAmibroker, qs.Amibroker(), func() (string, error) { return qs.Encode(FormatAmibroker) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := tc.modern()
+			if err != nil {
+				t.Fatalf("Encode: %v", err)
+			}
+			if got != tc.legacy {
+				t.Errorf("Encode(%q) differs from the legacy method", tc.format)
+			}
+		})
+	}
+}

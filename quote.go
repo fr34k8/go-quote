@@ -193,6 +193,8 @@ func (q Quote) Amibroker() string {
 }
 
 // WriteCSV - write Quote struct to csv file
+//
+// Deprecated: use Quote.WriteFile(filename, FormatCSV).
 func (q Quote) WriteCSV(filename string) error {
 	if filename == "" {
 		if q.Symbol != "" {
@@ -206,6 +208,8 @@ func (q Quote) WriteCSV(filename string) error {
 }
 
 // WriteAmibroker - write Quote struct to csv file
+//
+// Deprecated: use Quote.WriteFile(filename, FormatAmibroker).
 func (q Quote) WriteAmibroker(filename string) error {
 	if filename == "" {
 		if q.Symbol != "" {
@@ -219,6 +223,8 @@ func (q Quote) WriteAmibroker(filename string) error {
 }
 
 // WriteHighstock - write Quote struct to Highstock json format
+//
+// Deprecated: use Quote.WriteFile(filename, FormatHighstock).
 func (q Quote) WriteHighstock(filename string) error {
 	if filename == "" {
 		if q.Symbol != "" {
@@ -327,6 +333,7 @@ func (q Quote) JSON(indent bool) string {
 }
 
 // WriteJSON - write Quote struct to json file
+// Deprecated: use Quote.WriteFile(filename, FormatJSON).
 func (q Quote) WriteJSON(filename string, indent bool) error {
 	if filename == "" {
 		filename = q.Symbol + ".json"
@@ -431,6 +438,7 @@ func (q Quotes) Amibroker() string {
 }
 
 // WriteCSV - write Quotes structure to file
+// Deprecated: use Quotes.WriteFile(filename, FormatCSV).
 func (q Quotes) WriteCSV(filename string) error {
 	if filename == "" {
 		filename = "quotes.csv"
@@ -441,6 +449,7 @@ func (q Quotes) WriteCSV(filename string) error {
 }
 
 // WriteAmibroker - write Quotes structure to file
+// Deprecated: use Quotes.WriteFile(filename, FormatAmibroker).
 func (q Quotes) WriteAmibroker(filename string) error {
 	if filename == "" {
 		filename = "quotes.csv"
@@ -509,6 +518,7 @@ func (q Quotes) JSON(indent bool) string {
 }
 
 // WriteJSON - write Quote struct to json file
+// Deprecated: use Quotes.WriteFile(filename, FormatJSON).
 func (q Quotes) WriteJSON(filename string, indent bool) error {
 	if filename == "" {
 		filename = "quotes.json"
@@ -518,6 +528,7 @@ func (q Quotes) WriteJSON(filename string, indent bool) error {
 }
 
 // WriteHighstock - write Quote struct to json file in Highstock format
+// Deprecated: use Quotes.WriteFile(filename, FormatHighstock).
 func (q Quotes) WriteHighstock(filename string) error {
 	if filename == "" {
 		filename = "quotes.json"

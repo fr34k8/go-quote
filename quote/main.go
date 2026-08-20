@@ -11,6 +11,7 @@ Licensed under terms of MIT license
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -94,45 +95,33 @@ func check(e error) {
 	}
 }
 
+// checkFlags validates source, period, format, and credentials.
+//
+// This used to be a hand-maintained set of if/else chains, including a
+// 12-clause boolean for tiingo-crypto whose error message listed values the
+// condition did not accept ('1d', '3d', '1w', '1M') and said "invalid source"
+// when it meant period. The source and period vocabularies now come from the
+// provider registry, so they cannot drift from what the code actually accepts.
 func checkFlags(flags quoteflags) error {
-
-	// validate source
-	if flags.source != "tiingo" &&
-		flags.source != "tiingo-crypto" &&
-		flags.source != "coinbase" {
-		return fmt.Errorf("invalid source, must be either 'tiingo', 'tiingo-crypto', or 'coinbase'")
+	provider, err := quote.DefaultClient.Provider(flags.source)
+	if err != nil {
+		return err
 	}
 
-	// validate period
-	if flags.source == "tiingo" {
-		// check period
-		if !(flags.period == "d" || flags.period == "w" || flags.period == "m") {
-			return fmt.Errorf("invalid period for tiingo, must be 'd', 'w', or 'm'")
-		}
-		// check token
-		if flags.token == "" {
-			return fmt.Errorf("missing token for tiingo, must be passed or TIINGO_API_TOKEN must be set")
-		}
+	period, err := quote.ParsePeriod(flags.period)
+	if err != nil {
+		return err
+	}
+	if err := quote.CheckPeriod(provider, period); err != nil {
+		return err
 	}
 
-	if flags.source == "tiingo-crypto" &&
-		!(flags.period == "1m" ||
-			flags.period == "3m" ||
-			flags.period == "5m" ||
-			flags.period == "15m" ||
-			flags.period == "30m" ||
-			flags.period == "1h" ||
-			flags.period == "2h" ||
-			flags.period == "4h" ||
-			flags.period == "6h" ||
-			flags.period == "8h" ||
-			flags.period == "12h" ||
-			flags.period == "d") {
-		return fmt.Errorf("invalid source for tiingo-crypto, must be '1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w', or '1M'")
+	if _, err := quote.ParseFormat(flags.format); err != nil {
+		return err
 	}
 
-	if flags.source == "tiingo-crypto" && flags.token == "" {
-		return fmt.Errorf("missing token for tiingo-crypto, must be passed or TIINGO_API_TOKEN must be set")
+	if strings.HasPrefix(flags.source, "tiingo") && flags.token == "" {
+		return fmt.Errorf("missing token for %s, must be passed or TIINGO_API_TOKEN must be set", flags.source)
 	}
 
 	return nil
@@ -249,47 +238,37 @@ func getSymbols(flags quoteflags, args []string) ([]string, error) {
 	return symbols, nil
 }
 
-func getPeriod(periodFlag string) quote.Period {
-	period := quote.Daily
-	switch periodFlag {
-	case "1m":
-		period = quote.Min1
-	case "3m":
-		period = quote.Min3
-	case "5m":
-		period = quote.Min5
-	case "15m":
-		period = quote.Min15
-	case "30m":
-		period = quote.Min30
-	case "1h":
-		period = quote.Min60
-	case "2h":
-		period = quote.Hour2
-	case "4h":
-		period = quote.Hour4
-	case "6h":
-		period = quote.Hour6
-	case "8h":
-		period = quote.Hour8
-	case "12h":
-		period = quote.Hour12
-	case "d":
-		period = quote.Daily
-	case "1d":
-		period = quote.Daily
-	case "3d":
-		period = quote.Day3
-	case "w":
-		period = quote.Weekly
-	case "1w":
-		period = quote.Weekly
-	case "m":
-		period = quote.Monthly
-	case "1M":
-		period = quote.Monthly
+// resolved holds the validated, parsed form of the CLI flags. Parsing happens
+// once here instead of being re-derived in each output path.
+type resolved struct {
+	provider quote.Provider
+	period   quote.Period
+	format   quote.Format
+	from     time.Time
+	to       time.Time
+}
+
+func resolve(flags quoteflags) (*resolved, error) {
+	provider, err := quote.DefaultClient.Provider(flags.source)
+	if err != nil {
+		return nil, err
 	}
-	return period
+
+	period, err := quote.ParsePeriod(flags.period)
+	if err != nil {
+		return nil, err
+	}
+	if err := quote.CheckPeriod(provider, period); err != nil {
+		return nil, err
+	}
+
+	format, err := quote.ParseFormat(flags.format)
+	if err != nil {
+		return nil, err
+	}
+
+	from, to := getTimes(flags)
+	return &resolved{provider: provider, period: period, format: format, from: from, to: to}, nil
 }
 
 func getTimes(flags quoteflags) (time.Time, time.Time) {
@@ -299,69 +278,47 @@ func getTimes(flags quoteflags) (time.Time, time.Time) {
 	if flags.start != "" {
 		from = quote.ParseDateString(flags.start)
 	} else { // use years
-		from = to.Add(-time.Duration(int(time.Hour) * 24 * 365 * flags.years))
+		from = to.AddDate(-flags.years, 0, 0)
 	}
 	return from, to
 }
 
 func outputAll(symbols []string, flags quoteflags) error {
-	// output all in one file
-	from, to := getTimes(flags)
-	period := getPeriod(flags.period)
-	quotes := quote.Quotes{}
-	var err error
-	if flags.source == "tiingo" {
-		quotes, err = quote.NewQuotesFromTiingoSyms(symbols, from.Format(dateFormat), to.Format(dateFormat), period, flags.token)
-	} else if flags.source == "tiingo-crypto" {
-		quotes, err = quote.NewQuotesFromTiingoCryptoSyms(symbols, from.Format(dateFormat), to.Format(dateFormat), period, flags.token)
-	} else if flags.source == "coinbase" {
-		quotes, err = quote.NewQuotesFromCoinbaseSyms(symbols, from.Format(dateFormat), to.Format(dateFormat), period)
-	}
+	r, err := resolve(flags)
 	if err != nil {
 		return err
 	}
 
-	if flags.format == "csv" {
-		err = quotes.WriteCSV(flags.outfile)
-	} else if flags.format == "json" {
-		err = quotes.WriteJSON(flags.outfile, false)
-	} else if flags.format == "hs" {
-		err = quotes.WriteHighstock(flags.outfile)
-	} else if flags.format == "ami" {
-		err = quotes.WriteAmibroker(flags.outfile)
+	req := quote.Request{From: r.from, To: r.to, Period: r.period, Token: flags.token}
+	quotes, err := quote.DefaultClient.FetchSymbols(context.Background(), r.provider, symbols, req)
+	if err != nil {
+		return err
 	}
-	return err
+	return quotes.WriteFile(flags.outfile, r.format)
 }
 
 func outputIndividual(symbols []string, flags quoteflags) error {
-	// output individual symbol files
+	r, err := resolve(flags)
+	if err != nil {
+		return err
+	}
 
-	from, to := getTimes(flags)
-	period := getPeriod(flags.period)
-
-	for _, sym := range symbols {
-		var q quote.Quote
-		if flags.source == "tiingo" {
-			q, _ = quote.NewQuoteFromTiingo(sym, from.Format(dateFormat), to.Format(dateFormat), period, flags.token)
-		} else if flags.source == "tiingo-crypto" {
-			q, _ = quote.NewQuoteFromTiingoCrypto(sym, from.Format(dateFormat), to.Format(dateFormat), period, flags.token)
-		} else if flags.source == "coinbase" {
-			q, _ = quote.NewQuoteFromCoinbase(sym, from.Format(dateFormat), to.Format(dateFormat), period)
+	ctx := context.Background()
+	for i, sym := range symbols {
+		if i > 0 {
+			time.Sleep(quote.Delay * time.Millisecond)
 		}
-		var err error
-		if flags.format == "csv" {
-			err = q.WriteCSV(flags.outfile)
-		} else if flags.format == "json" {
-			err = q.WriteJSON(flags.outfile, false)
-		} else if flags.format == "hs" {
-			err = q.WriteHighstock(flags.outfile)
-		} else if flags.format == "ami" {
-			err = q.WriteAmibroker(flags.outfile)
-		}
+		req := quote.Request{Symbol: sym, From: r.from, To: r.to, Period: r.period, Token: flags.token}
+		q, err := r.provider.Fetch(ctx, req)
 		if err != nil {
-			fmt.Printf("Error writing file: %v\n", err)
+			// Previously the fetch error was discarded and an empty file was
+			// written for the symbol.
+			fmt.Fprintf(os.Stderr, "error downloading %s: %v\n", sym, err)
+			continue
 		}
-		time.Sleep(quote.Delay * time.Millisecond)
+		if err := q.WriteFile(flags.outfile, r.format); err != nil {
+			fmt.Fprintf(os.Stderr, "error writing file for %s: %v\n", sym, err)
+		}
 	}
 	return nil
 }
