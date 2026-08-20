@@ -46,13 +46,16 @@ The library is one package (`quote`) at the repo root, split across topic files:
 | `market.go` / `ftp.go` | `marketSources` table, symbol lists; anonymous FTP |
 | `update.go` | `UpdateFileTiingo` - in-place CSV updates with backfill |
 | `errors.go` / `fetchall.go` | `SymbolNotFoundError`; `FetchAll` |
+| `docs/adding-a-provider.md` | checklist for adding a data source |
 
 **Preferred API**: construct a `Client` and use `Client.Provider(name)` plus
 `Provider.Fetch(ctx, Request)`. The older package-level functions
 (`NewQuoteFromTiingo`, the `Write*` methods, `Delay`, `Log`) still work and
-delegate to `DefaultClient`, but are marked `// Deprecated:`. Adding a data
-source means implementing `Provider` and calling `RegisterProvider`; adding an
-output format means extending `Format`. Neither requires touching the CLI.
+delegate to `DefaultClient`, but are marked `// Deprecated:`. Adding an output
+format means extending `Format`. Adding a data source means implementing
+`Provider` and calling `RegisterProvider` - that covers CLI dispatch and period
+validation, but not the base-URL test seam, `Quote.Precision`, UTC timestamps,
+or the three tests that enumerate sources. See `docs/adding-a-provider.md`.
 
 **quote/main.go** - CLI wrapper (~425 lines):
 - Flag parsing for all options (years, period, source, format, etc.)

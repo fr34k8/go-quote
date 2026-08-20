@@ -246,8 +246,11 @@ decimals present in the file, so reading a file and writing it out again does
 not round it.
 
 **Adding a data source** means implementing `quote.Provider` and calling
-`quote.RegisterProvider`; the CLI picks it up from the registry with no further
-changes.
+`quote.RegisterProvider`. That is enough for `-source` dispatch and period
+validation, which are registry-driven. A source added to the package itself also
+needs a base-URL seam so it can be tested, `Quote.Precision` stamped, UTC
+timestamps, and updates to three tests that know the set of sources -
+[docs/adding-a-provider.md](docs/adding-a-provider.md) is the full checklist.
 
 ## Upgrading
 
