@@ -1,6 +1,7 @@
 package quote
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,10 +13,10 @@ import (
 )
 
 // assert fails the test if the condition is false.
-func assert(t *testing.T, condition bool, msg string, v ...interface{}) {
+func assert(t *testing.T, condition bool, msg string, v ...any) {
 	if !condition {
 		_, file, line, _ := runtime.Caller(1)
-		fmt.Printf("%s:%d: "+msg+"\n", append([]interface{}{filepath.Base(file), line}, v...)...)
+		fmt.Printf("%s:%d: "+msg+"\n", append([]any{filepath.Base(file), line}, v...)...)
 		t.FailNow()
 	}
 }
@@ -30,7 +31,7 @@ func ok(t *testing.T, err error) {
 }
 
 // equals fails the test if exp is not equal to act.
-func equals(t *testing.T, exp, act interface{}) {
+func equals(t *testing.T, exp, act any) {
 	if !reflect.DeepEqual(exp, act) {
 		_, file, line, _ := runtime.Caller(1)
 		fmt.Printf("%s:%d:\n\texp: %#v\n\tgot: %#v\n", filepath.Base(file), line, exp, act)
@@ -292,4 +293,307 @@ aapl,2018-07-20 00:00,191.78,192.43,190.17,188.57,20676200.00`
 	if q[1].Close[len(q[1].Close)-1] != 188.57 {
 		t.Error("Invalid last value")
 	}
+}
+
+// --- Phase 0 regression tests ---
+
+// TestNewQuotesFromCSVOrderPreserved pins first-appearance symbol ordering.
+// The previous implementation ranged over a map[string]int while consuming
+// rows with a shared counter, so symbols were assigned each other's bars.
+// With 8 symbols an accidental pass is ~1/40320, versus ~1/2 in the older
+// two-symbol test, which was genuinely flaky on master.
+func TestNewQuotesFromCSVOrderPreserved(t *testing.T) {
+	syms := []string{"spy", "aapl", "msft", "amzn", "goog", "tsla", "nvda", "meta"}
+
+	var b strings.Builder
+	b.WriteString("symbol,datetime,open,high,low,close,volume\n")
+	for i, s := range syms {
+		// close price encodes the symbol index, so a mis-assignment is visible
+		for bar := range 3 {
+			fmt.Fprintf(&b, "%s,2018-07-%02d 00:00,1,2,0.5,%d.%02d,100\n",
+				s, 12+bar, i+1, bar)
+		}
+	}
+
+	q, err := NewQuotesFromCSV(strings.TrimRight(b.String(), "\n"))
+	if err != nil {
+		t.Fatalf("NewQuotesFromCSV: %v", err)
+	}
+	if len(q) != len(syms) {
+		t.Fatalf("got %d quotes, want %d", len(q), len(syms))
+	}
+	for i, want := range syms {
+		if q[i].Symbol != want {
+			t.Errorf("quote %d: symbol = %q, want %q", i, q[i].Symbol, want)
+		}
+		if len(q[i].Close) != 3 {
+			t.Fatalf("quote %d (%s): got %d bars, want 3", i, q[i].Symbol, len(q[i].Close))
+		}
+		// every bar must belong to this symbol, not a neighbour's block
+		for bar := range 3 {
+			wantClose := float64(i+1) + float64(bar)/100
+			if q[i].Close[bar] != wantClose {
+				t.Errorf("quote %d (%s) bar %d: close = %v, want %v",
+					i, want, bar, q[i].Close[bar], wantClose)
+			}
+		}
+	}
+}
+
+// TestValidMarketNoTokenSideEffects: ValidMarket answers "is this a known
+// market name" only. It used to also check TIINGO_API_TOKEN and print to
+// stdout, so a valid name returned false when credentials were absent.
+func TestValidMarketNoTokenSideEffects(t *testing.T) {
+	t.Setenv("TIINGO_API_TOKEN", "")
+
+	for _, m := range []string{"etf", "nasdaq", "tiingo-btc", "coinbase"} {
+		if !ValidMarket(m) {
+			t.Errorf("ValidMarket(%q) = false, want true", m)
+		}
+	}
+	if ValidMarket("definitely-not-a-market") {
+		t.Error("ValidMarket(bogus) = true, want false")
+	}
+	if !MarketRequiresToken("tiingo-btc") {
+		t.Error("MarketRequiresToken(tiingo-btc) = false, want true")
+	}
+	if MarketRequiresToken("nasdaq") {
+		t.Error("MarketRequiresToken(nasdaq) = true, want false")
+	}
+}
+
+// TestNewMarketListTokenError: a tiingo market without a token must report
+// the missing credential, not fall through to an HTTP request.
+func TestNewMarketListTokenError(t *testing.T) {
+	t.Setenv("TIINGO_API_TOKEN", "")
+
+	_, err := NewMarketList("tiingo-btc")
+	if err == nil {
+		t.Fatal("expected error for tiingo market without token")
+	}
+	if !strings.Contains(err.Error(), "TIINGO_API_TOKEN") {
+		t.Errorf("error = %q, want it to mention TIINGO_API_TOKEN", err)
+	}
+}
+
+// TestNewMarketListRejectsUnknown: every ValidMarkets entry must resolve to a
+// source. "etf" previously passed ValidMarket but had no switch case, leaving
+// url == "" and failing with `unsupported protocol scheme ""`.
+func TestNewMarketListRejectsUnknown(t *testing.T) {
+	_, err := NewMarketList("bogus-market")
+	if err == nil {
+		t.Fatal("expected error for unknown market")
+	}
+	if strings.Contains(err.Error(), "unsupported protocol scheme") {
+		t.Errorf("unknown market reached the http client: %v", err)
+	}
+}
+
+// --- Phase 1 characterization tests ---
+
+func testQuote(sym string, bars int) Quote {
+	q := NewQuote(sym, bars)
+	base := time.Date(2018, 7, 12, 0, 0, 0, 0, time.UTC)
+	for i := range bars {
+		q.Date[i] = base.AddDate(0, 0, i)
+		q.Open[i] = float64(i) + 1.10
+		q.High[i] = float64(i) + 2.20
+		q.Low[i] = float64(i) + 0.30
+		q.Close[i] = float64(i) + 1.50
+		q.Volume[i] = float64((i + 1) * 1000)
+	}
+	return q
+}
+
+// TestQuoteCSVRoundTrip: Quote -> CSV -> Quote must preserve every field.
+// This is the safety net for replacing the hand-rolled formatter.
+func TestQuoteCSVRoundTrip(t *testing.T) {
+	orig := testQuote("spy", 5)
+
+	got, err := NewQuoteFromCSV(orig.Symbol, orig.CSV())
+	if err != nil {
+		t.Fatalf("NewQuoteFromCSV: %v", err)
+	}
+	if got.Symbol != orig.Symbol {
+		t.Errorf("symbol = %q, want %q", got.Symbol, orig.Symbol)
+	}
+	if len(got.Close) != len(orig.Close) {
+		t.Fatalf("bars = %d, want %d", len(got.Close), len(orig.Close))
+	}
+	for i := range orig.Close {
+		if !got.Date[i].Equal(orig.Date[i]) {
+			t.Errorf("bar %d date = %v, want %v", i, got.Date[i], orig.Date[i])
+		}
+		for _, f := range []struct {
+			name      string
+			got, want float64
+		}{
+			{"open", got.Open[i], orig.Open[i]},
+			{"high", got.High[i], orig.High[i]},
+			{"low", got.Low[i], orig.Low[i]},
+			{"close", got.Close[i], orig.Close[i]},
+			{"volume", got.Volume[i], orig.Volume[i]},
+		} {
+			if f.got != f.want {
+				t.Errorf("bar %d %s = %v, want %v", i, f.name, f.got, f.want)
+			}
+		}
+	}
+}
+
+// TestQuotesCSVRoundTrip covers the multi-symbol path.
+func TestQuotesCSVRoundTrip(t *testing.T) {
+	orig := Quotes{testQuote("spy", 4), testQuote("aapl", 3), testQuote("msft", 5)}
+
+	got, err := NewQuotesFromCSV(strings.TrimRight(orig.CSV(), "\n"))
+	if err != nil {
+		t.Fatalf("NewQuotesFromCSV: %v", err)
+	}
+	if len(got) != len(orig) {
+		t.Fatalf("quotes = %d, want %d", len(got), len(orig))
+	}
+	for i := range orig {
+		if got[i].Symbol != orig[i].Symbol {
+			t.Errorf("quote %d symbol = %q, want %q", i, got[i].Symbol, orig[i].Symbol)
+		}
+		if len(got[i].Close) != len(orig[i].Close) {
+			t.Errorf("quote %d (%s) bars = %d, want %d",
+				i, orig[i].Symbol, len(got[i].Close), len(orig[i].Close))
+			continue
+		}
+		for bar := range orig[i].Close {
+			if got[i].Close[bar] != orig[i].Close[bar] {
+				t.Errorf("quote %d (%s) bar %d close = %v, want %v",
+					i, orig[i].Symbol, bar, got[i].Close[bar], orig[i].Close[bar])
+			}
+		}
+	}
+}
+
+func TestQuoteJSONRoundTrip(t *testing.T) {
+	orig := testQuote("spy", 5)
+
+	got, err := NewQuoteFromJSON(orig.JSON(false))
+	if err != nil {
+		t.Fatalf("NewQuoteFromJSON: %v", err)
+	}
+	if got.Symbol != orig.Symbol || len(got.Close) != len(orig.Close) {
+		t.Fatalf("got %s/%d bars, want %s/%d",
+			got.Symbol, len(got.Close), orig.Symbol, len(orig.Close))
+	}
+	for i := range orig.Close {
+		if got.Close[i] != orig.Close[i] {
+			t.Errorf("bar %d close = %v, want %v", i, got.Close[i], orig.Close[i])
+		}
+	}
+}
+
+// TestHighstockValidJSON: the Highstock encoders advertise JSON, so their
+// output must parse. Quotes.Highstock writes the `"sym":[` opener inside the
+// bar loop but the closing `]` unconditionally, so a symbol with zero bars
+// emits a stray bracket.
+func TestHighstockValidJSON(t *testing.T) {
+	cases := []struct {
+		name string
+		in   Quotes
+	}{
+		{"single", Quotes{testQuote("spy", 3)}},
+		{"multiple", Quotes{testQuote("spy", 3), testQuote("aapl", 2)}},
+		{"empty bars", Quotes{testQuote("spy", 3), testQuote("aapl", 0)}},
+		{"all empty", Quotes{testQuote("spy", 0)}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := tc.in.Highstock()
+			var v map[string]any
+			if err := json.Unmarshal([]byte(out), &v); err != nil {
+				t.Errorf("Quotes.Highstock produced invalid JSON: %v\noutput:\n%s", err, out)
+			}
+		})
+	}
+}
+
+func TestQuoteHighstockValidJSON(t *testing.T) {
+	for _, bars := range []int{0, 1, 5} {
+		out := testQuote("spy", bars).Highstock()
+		var v any
+		if err := json.Unmarshal([]byte(out), &v); err != nil {
+			t.Errorf("Quote.Highstock(%d bars) produced invalid JSON: %v\noutput:\n%s",
+				bars, err, out)
+		}
+	}
+}
+
+func TestGetPrecision(t *testing.T) {
+	cases := []struct {
+		symbol string
+		want   int
+	}{
+		{"spy", 2},
+		{"aapl", 2},
+		{"btcusd", 8},
+		{"BTC-USD", 8},
+		{"eth-usd", 8},
+		// documents a known false positive: an equity ticker containing "usd"
+		{"usdcorp", 8},
+	}
+	for _, tc := range cases {
+		if got := getPrecision(tc.symbol); got != tc.want {
+			t.Errorf("getPrecision(%q) = %d, want %d", tc.symbol, got, tc.want)
+		}
+	}
+}
+
+func TestDeleteEmpty(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{"removes empties", []string{"a", "", "b", "", ""}, []string{"a", "b"}},
+		{"all empty", []string{"", ""}, nil},
+		{"nothing to remove", []string{"a", "b"}, []string{"a", "b"}},
+		{"empty input", nil, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := deleteEmpty(tc.in)
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+			for i := range tc.want {
+				if got[i] != tc.want[i] {
+					t.Errorf("index %d = %q, want %q", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestParseDateString pins current behavior, including the sharp edges:
+// "" returns now, an unparseable string returns the zero time, and input
+// longer than the layout panics.
+func TestParseDateString(t *testing.T) {
+	if got := ParseDateString("2018-07-12"); !got.Equal(time.Date(2018, 7, 12, 0, 0, 0, 0, time.UTC)) {
+		t.Errorf("ParseDateString(date) = %v", got)
+	}
+	if got := ParseDateString("2018"); !got.Equal(time.Date(2018, 1, 1, 0, 0, 0, 0, time.UTC)) {
+		t.Errorf("ParseDateString(year) = %v", got)
+	}
+	if got := ParseDateString(""); got.IsZero() {
+		t.Error("ParseDateString(\"\") should return now, got zero time")
+	}
+	if got := ParseDateString("not-a-date"); !got.IsZero() {
+		t.Errorf("ParseDateString(garbage) = %v, want zero time", got)
+	}
+
+	t.Run("overlong input panics", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Error("expected panic for input longer than the layout")
+			}
+		}()
+		_ = ParseDateString("2018-07-12 00:00:00")
+	})
 }

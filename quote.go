@@ -1,7 +1,7 @@
 /*
-Package quote is free quote downloader library and cli
+Package quote is a free quote downloader library and cli.
 
-# Downloads historical price quotes from Tiingo and Coinbase
+It downloads historical price quotes from Tiingo and Coinbase.
 
 Copyright 2025 Mark Chenoweth
 Licensed under terms of MIT license (see LICENSE)
@@ -16,7 +16,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"math/rand"
 	"net"
 	"net/http"
 	"net/textproto"
@@ -219,18 +218,37 @@ func (q Quote) WriteHighstock(filename string) error {
 	return os.WriteFile(filename, []byte(csv), 0644)
 }
 
+// csvRows splits a csv payload into data rows of exactly want fields.
+// The header row is dropped, as are blank lines: the Write* methods emit a
+// trailing newline, which previously sized the Quote one bar too large and
+// left a phantom all-zero bar at the end. Parsing stops at the first row with
+// an unexpected field count, matching the original behavior.
+func csvRows(csv string, want int) [][]string {
+	lines := strings.Split(strings.ReplaceAll(csv, "\r\n", "\n"), "\n")
+	if len(lines) < 2 {
+		return nil
+	}
+	rows := make([][]string, 0, len(lines)-1)
+	for _, line := range lines[1:] {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		fields := strings.Split(line, ",")
+		if len(fields) != want {
+			break
+		}
+		rows = append(rows, fields)
+	}
+	return rows
+}
+
 // NewQuoteFromCSV - parse csv quote string into Quote structure
 func NewQuoteFromCSV(symbol, csv string) (Quote, error) {
 
-	tmp := strings.Split(csv, "\n")
-	numrows := len(tmp)
-	q := NewQuote(symbol, numrows-1)
+	rows := csvRows(csv, 6)
+	q := NewQuote(symbol, len(rows))
 
-	for row, bar := 1, 0; row < numrows; row, bar = row+1, bar+1 {
-		line := strings.Split(tmp[row], ",")
-		if len(line) != 6 {
-			break
-		}
+	for bar, line := range rows {
 		q.Date[bar], _ = time.Parse("2006-01-02 15:04", line[0])
 		q.Open[bar], _ = strconv.ParseFloat(line[1], 64)
 		q.High[bar], _ = strconv.ParseFloat(line[2], 64)
@@ -245,16 +263,16 @@ func NewQuoteFromCSV(symbol, csv string) (Quote, error) {
 // with specified DateTime format
 func NewQuoteFromCSVDateFormat(symbol, csv string, format string) (Quote, error) {
 
-	tmp := strings.Split(csv, "\n")
-	numrows := len(tmp)
-	q := NewQuote("", numrows-1)
-
 	if len(strings.TrimSpace(format)) == 0 {
 		format = "2006-01-02 15:04"
 	}
 
-	for row, bar := 1, 0; row < numrows; row, bar = row+1, bar+1 {
-		line := strings.Split(tmp[row], ",")
+	rows := csvRows(csv, 6)
+	// NewQuote("", ...) here dropped the caller's symbol on the floor; the
+	// sibling NewQuoteFromCSV always set it.
+	q := NewQuote(symbol, len(rows))
+
+	for bar, line := range rows {
 		q.Date[bar], _ = time.Parse(format, line[0])
 		q.Open[bar], _ = strconv.ParseFloat(line[1], 64)
 		q.High[bar], _ = strconv.ParseFloat(line[2], 64)
@@ -331,7 +349,7 @@ func (q Quotes) CSV() string {
 
 	buffer.WriteString("symbol,datetime,open,high,low,close,volume\n")
 
-	for sym := 0; sym < len(q); sym++ {
+	for sym := range q {
 		quote := q[sym]
 		precision := getPrecision(quote.Symbol)
 		for bar := range quote.Close {
@@ -351,16 +369,17 @@ func (q Quotes) Highstock() string {
 
 	buffer.WriteString("{")
 
-	for sym := 0; sym < len(q); sym++ {
+	for sym := range q {
 		quote := q[sym]
 		precision := getPrecision(quote.Symbol)
+		// The opening `"sym":[` must be written unconditionally. Emitting it
+		// inside the bar loop meant a symbol with zero bars produced a closing
+		// bracket with no opener, making the whole document invalid JSON.
+		buffer.WriteString(fmt.Sprintf("\"%s\":[\n", quote.Symbol))
 		for bar := range quote.Close {
 			comma := ","
 			if bar == len(quote.Close)-1 {
 				comma = ""
-			}
-			if bar == 0 {
-				buffer.WriteString(fmt.Sprintf("\"%s\":[\n", quote.Symbol))
 			}
 			str := fmt.Sprintf("[%d,%.*f,%.*f,%.*f,%.*f,%.*f]%s\n",
 				quote.Date[bar].UnixNano()/1000000, precision, quote.Open[bar], precision, quote.High[bar], precision, quote.Low[bar], precision, quote.Close[bar], precision, quote.Volume[bar], comma)
@@ -385,7 +404,7 @@ func (q Quotes) Amibroker() string {
 
 	buffer.WriteString("symbol,date,time,open,high,low,close,volume\n")
 
-	for sym := 0; sym < len(q); sym++ {
+	for sym := range q {
 		quote := q[sym]
 		precision := getPrecision(quote.Symbol)
 		for bar := range quote.Close {
@@ -422,20 +441,27 @@ func (q Quotes) WriteAmibroker(filename string) error {
 func NewQuotesFromCSV(csv string) (Quotes, error) {
 
 	quotes := Quotes{}
-	tmp := strings.Split(csv, "\n")
-	numrows := len(tmp)
+	rows := csvRows(csv, 7)
 
+	// Count bars per symbol, and record first-appearance order separately.
+	// Ranging over the map directly would consume rows in randomized order,
+	// assigning each symbol another symbol's bars.
 	var index = make(map[string]int)
-	for idx := 1; idx < numrows; idx++ {
-		sym := strings.Split(tmp[idx], ",")[0]
+	var order []string
+	for _, line := range rows {
+		sym := line[0]
+		if _, seen := index[sym]; !seen {
+			order = append(order, sym)
+		}
 		index[sym]++
 	}
 
-	row := 1
-	for sym, len := range index {
-		q := NewQuote(sym, len)
-		for bar := 0; bar < len; bar++ {
-			line := strings.Split(tmp[row], ",")
+	row := 0
+	for _, sym := range order {
+		bars := index[sym]
+		q := NewQuote(sym, bars)
+		for bar := range bars {
+			line := rows[row]
 			q.Date[bar], _ = time.Parse("2006-01-02 15:04", line[1])
 			q.Open[bar], _ = strconv.ParseFloat(line[2], 64)
 			q.High[bar], _ = strconv.ParseFloat(line[3], 64)
@@ -506,30 +532,6 @@ func NewQuotesFromJSONFile(filename string) (Quotes, error) {
 	return NewQuotesFromJSON(string(jsn))
 }
 
-// pickRandomUserAgent selects a random user agent from the list
-func pickRandomUserAgent() string {
-	var USER_AGENTS = []string{
-		// Chrome
-		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
-		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
-		"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
-
-		// Firefox
-		"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:135.0) Gecko/20100101 Firefox/135.0",
-		"Mozilla/5.0 (Macintosh; Intel Mac OS X 14.7; rv:135.0) Gecko/20100101 Firefox/135.0",
-		"Mozilla/5.0 (X11; Linux i686; rv:135.0) Gecko/20100101 Firefox/135.0",
-
-		// Safari
-		"Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Safari/605.1.15",
-
-		// Edge
-		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36 Edg/131.0.2903.86",
-	}
-
-	rand.NewSource(time.Now().UnixNano())
-	return USER_AGENTS[rand.Intn(len(USER_AGENTS))]
-}
-
 func tiingoDaily(symbol string, from, to time.Time, period Period, token string) (Quote, error) {
 
 	type tquote struct {
@@ -588,7 +590,7 @@ func tiingoDaily(symbol string, from, to time.Time, period Period, token string)
 	numrows := len(tiingo)
 	quote := NewQuote(symbol, numrows)
 
-	for bar := 0; bar < numrows; bar++ {
+	for bar := range numrows {
 		quote.Date[bar], _ = time.Parse("2006-01-02", tiingo[bar].Date[0:10])
 		quote.Open[bar] = tiingo[bar].AdjOpen
 		quote.High[bar] = tiingo[bar].AdjHigh
@@ -971,7 +973,7 @@ func updateMultiTiingo(path, header, token string, backfillDays int, fullRedownl
 	}
 
 	jobs := make(chan string, len(order))
-	for i := 0; i < concurrency; i++ {
+	for range concurrency {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -1186,7 +1188,7 @@ func tiingoCrypto(symbol string, from, to time.Time, period Period, token string
 	numrows := len(crypto[0].PriceData)
 	quote := NewQuote(symbol, numrows)
 
-	for bar := 0; bar < numrows; bar++ {
+	for bar := range numrows {
 		quote.Date[bar], _ = time.Parse(time.RFC3339, crypto[0].PriceData[bar].Date)
 		quote.Open[bar] = crypto[0].PriceData[bar].Open
 		quote.High[bar] = crypto[0].PriceData[bar].High
@@ -1290,32 +1292,43 @@ func NewQuoteFromCoinbase(symbol, startDate, endDate string, period Period) (Quo
 
 	//Log.Printf("startBar=%v, endBar=%v\n", startBar, endBar)
 
+	// One client for the whole paging run: a per-iteration client defeats
+	// connection pooling and leaks a transport per page.
+	client := &http.Client{Timeout: ClientTimeout}
+
 	for startBar.Before(end) {
 
-		url := fmt.Sprintf(
+		reqURL := fmt.Sprintf(
 			"https://api.exchange.coinbase.com/products/%s/candles?start=%s&end=%s&granularity=%d",
 			symbol,
 			url.QueryEscape(startBar.Format(time.RFC3339)),
 			url.QueryEscape(endBar.Format(time.RFC3339)),
 			granularity)
 
-		client := &http.Client{Timeout: ClientTimeout}
-		req, _ := http.NewRequest("GET", url, nil)
+		req, err := http.NewRequest("GET", reqURL, nil)
+		if err != nil {
+			return NewQuote("", 0), err
+		}
 		resp, err := client.Do(req)
 
 		if err != nil {
 			Log.Printf("coinbase error: %v\n", err)
 			return NewQuote("", 0), err
 		}
-		defer resp.Body.Close()
 
-		contents, _ := io.ReadAll(resp.Body)
+		contents, err := io.ReadAll(resp.Body)
+		// Close per iteration; a deferred close here would hold every page's
+		// body open until the whole backfill finished.
+		resp.Body.Close()
+		if err != nil {
+			return NewQuote("", 0), err
+		}
 
 		type cb [6]float64
 		var bars []cb
-		err = json.Unmarshal(contents, &bars)
-		if err != nil {
+		if err = json.Unmarshal(contents, &bars); err != nil {
 			Log.Printf("coinbase error: %v\n", err)
+			return NewQuote("", 0), fmt.Errorf("parsing coinbase candles for %s: %w", symbol, err)
 		}
 
 		numrows := len(bars)
@@ -1323,7 +1336,7 @@ func NewQuoteFromCoinbase(symbol, startDate, endDate string, period Period) (Quo
 
 		//Log.Printf("numrows=%d, bars=%v\n", numrows, bars)
 
-		for row := 0; row < numrows; row++ {
+		for row := range numrows {
 			bar := numrows - 1 - row // reverse the order
 			q.Date[bar] = time.Unix(int64(bars[row][0]), 0)
 			q.Low[bar] = bars[row][1]
@@ -1456,18 +1469,19 @@ var ValidMarkets = [...]string{
 
 // ValidMarket - validate market string
 func ValidMarket(market string) bool {
-	if strings.HasPrefix(market, "tiingo") {
-		if os.Getenv("TIINGO_API_TOKEN") == "" {
-			fmt.Println("ERROR: Requires TIINGO_API_TOKEN to be set")
-			return false
-		}
-	}
 	for _, v := range ValidMarkets {
 		if v == market {
 			return true
 		}
 	}
 	return false
+}
+
+// MarketRequiresToken - reports whether a market needs TIINGO_API_TOKEN set.
+// ValidMarket answers only "is this a known market name"; the credential
+// check is separate so callers can report it themselves.
+func MarketRequiresToken(market string) bool {
+	return strings.HasPrefix(market, "tiingo")
 }
 
 // NewMarketList - download a list of market symbols to an array of strings
@@ -1477,6 +1491,16 @@ func NewMarketList(market string) ([]string, error) {
 	if !ValidMarket(market) {
 		return symbols, fmt.Errorf("invalid market")
 	}
+
+	if MarketRequiresToken(market) && os.Getenv("TIINGO_API_TOKEN") == "" {
+		return symbols, fmt.Errorf("market %q requires TIINGO_API_TOKEN to be set", market)
+	}
+
+	// etf comes from the NASDAQ symbol directory over FTP, not a JSON API.
+	if market == "etf" {
+		return NewEtfList()
+	}
+
 	var url string
 	switch market {
 	case "nasdaq":
@@ -1529,6 +1553,11 @@ func NewMarketList(market string) ([]string, error) {
 		url = fmt.Sprintf("https://api.tiingo.com/tiingo/crypto?token=%s", os.Getenv("TIINGO_API_TOKEN"))
 	case "coinbase":
 		url = "https://api.exchange.coinbase.com/products"
+	default:
+		// ValidMarkets and this switch must stay in sync; without this arm a
+		// missing case silently yields an empty url and an obscure
+		// "unsupported protocol scheme" from the http client.
+		return symbols, fmt.Errorf("no source configured for market %q", market)
 	}
 
 	req, _ := http.NewRequest("GET", url, nil)
@@ -1637,18 +1666,17 @@ func getNasdaqMarket(market, rawdata string) ([]string, error) {
 	var apiResponse ApiResponse
 	err := json.Unmarshal([]byte(rawdata), &apiResponse)
 	if err != nil {
-		log.Fatalf("Error parsing JSON: %v", err)
+		return nil, fmt.Errorf("parsing %s market json: %w", market, err)
 	}
 
 	var symbols []string
 	for _, row := range apiResponse.Data.Rows {
 		symbols = append(symbols, strings.ToLower(row.Symbol))
-		//fmt.Printf("Symbol: %s\n", row.Symbol)
 	}
 
 	sort.Strings(symbols)
 
-	return symbols, err
+	return symbols, nil
 }
 
 func getNasdaq100Market(market, rawdata string) ([]string, error) {
@@ -1705,18 +1733,17 @@ func getNasdaq100Market(market, rawdata string) ([]string, error) {
 	var apiResponse ApiResponse
 	err := json.Unmarshal([]byte(rawdata), &apiResponse)
 	if err != nil {
-		log.Fatalf("Error parsing JSON: %v", err)
+		return nil, fmt.Errorf("parsing %s market json: %w", market, err)
 	}
 
 	var symbols []string
 	for _, row := range apiResponse.Data.Data.Rows {
 		symbols = append(symbols, strings.ToLower(row.Symbol))
-		//fmt.Printf("Symbol: %s\n", row.Symbol)
 	}
 
 	sort.Strings(symbols)
 
-	return symbols, err
+	return symbols, nil
 }
 
 func getCoinbaseMarket(market, rawdata string) ([]string, error) {
@@ -1846,9 +1873,10 @@ func getAnonFTP(addr, port string, dir string, fname string) ([]byte, error) {
 	_ = conn.PrintfLine("RETR %s", fname)
 	_, _, _ = conn.ReadResponse(1)
 	dconn, err := net.DialTimeout("tcp", addr+":"+strconv.Itoa(dport), timeout)
-	if err == nil {
-		defer dconn.Close()
+	if err != nil {
+		return contents, err
 	}
+	defer dconn.Close()
 
 	contents, err = io.ReadAll(dconn)
 	if err != nil {

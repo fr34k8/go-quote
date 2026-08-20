@@ -98,8 +98,8 @@ Date format: `2006-01-02 15:04` (time is always 00:00 for daily data)
 
 ## Development Notes
 
-- Go version: 1.22+ (per go.mod)
+- Go version: 1.24+ (per go.mod); `strings.SplitSeq` sets that floor
 - No external dependencies
 - All HTTP clients use 10-second timeout (`ClientTimeout` constant)
-- User agents are randomized from a pool (Chrome, Firefox, Safari, Edge) for NASDAQ API requests
+- NASDAQ API requests send a fixed `markcheno/go-quote` user agent
 - Precision: 2 decimals for stocks, 8 decimals for crypto (BTC/ETH/USD symbols)
