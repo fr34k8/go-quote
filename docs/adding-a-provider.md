@@ -146,7 +146,7 @@ Three existing tests know the set of sources and will fail or silently skip
 your provider:
 
 | Test | What to do |
-|---|---|
+| --- | --- |
 | `TestProviderRegistry` | hardcodes the expected `ProviderNames()`; add yours (sorted) |
 | `TestProvidersSetPrecision` | add a handler `case` and assert your precision |
 | `TestAllSourcesProduceUTC` | add a handler `case` and a row to the table |
@@ -217,5 +217,7 @@ them:
 - [ ] every timestamp `.UTC()`
 - [ ] `XxxSyms` via `c.FetchAll`
 - [ ] provider adapter and `init()` registration
-- [ ] `TestProviderRegistry`, `TestProvidersSetPrecision`, `TestAllSourcesProduceUTC` updated
-- [ ] `gofmt`, `go vet`, `go test -race`, and `apidiff` reporting no incompatible changes
+- [ ] `TestProviderRegistry`, `TestProvidersSetPrecision` and
+      `TestAllSourcesProduceUTC` updated
+- [ ] `gofmt`, `go vet`, `go test -race`, and `apidiff` reporting no
+      incompatible changes

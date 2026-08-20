@@ -1,0 +1,17 @@
+# markdownlint configuration
+#
+# MD010/no-hard-tabs: Go is tab-indented and gofmt enforces it, so every Go
+# snippet in README.md and docs/adding-a-provider.md is legitimately full of
+# hard tabs. Converting them to spaces to satisfy the linter would mean
+# publishing code that gofmt rewrites the moment anyone pastes it - in a
+# document whose whole purpose is showing people how to write code for this
+# repo. Tabs outside code blocks are still flagged.
+MD010:
+  code_blocks: false
+
+# MD013/line-length: prose wraps at 80. Code blocks do not - breaking a Go
+# function signature to fit a column would make the example worse than the
+# thing it documents - and a table row cannot wrap at all.
+MD013:
+  code_blocks: false
+  tables: false

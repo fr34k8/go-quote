@@ -35,7 +35,7 @@ quote -help
 The library is one package (`quote`) at the repo root, split across topic files:
 
 | File | Contents |
-|---|---|
+| --- | --- |
 | `quote.go` | `Quote`/`Quotes`/`Period` types, constants, `Log`, `Delay`, helpers |
 | `client.go` | `Client`, `DefaultClient`, shared HTTP transport, `RetryPolicy`, `HTTPError` |
 | `provider.go` | `Provider` interface, registry, the three built-in sources |
