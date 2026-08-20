@@ -33,6 +33,9 @@ func UpdateFileTiingo(path string, token string, backfillDays int, fullRedownloa
 	scanner := bufio.NewScanner(f)
 	scanner.Split(bufio.ScanLines)
 	if !scanner.Scan() {
+		if err := scanner.Err(); err != nil {
+			return fmt.Errorf("reading %s: %w", path, err)
+		}
 		return fmt.Errorf("empty file: %s", path)
 	}
 	header := strings.TrimSpace(scanner.Text())
@@ -123,6 +126,9 @@ func updateSingleTiingo(path, header, symbol, token string, backfillDays int, fu
 	sc := bufio.NewScanner(in)
 	sc.Split(bufio.ScanLines)
 	if !sc.Scan() {
+		if err := sc.Err(); err != nil {
+			return fmt.Errorf("reading %s: %w", path, err)
+		}
 		return fmt.Errorf("empty file: %s", path)
 	}
 	// header already captured, continue scanning data
@@ -153,6 +159,11 @@ func updateSingleTiingo(path, header, symbol, token string, backfillDays int, fu
 				last = dt
 			}
 		}
+	}
+	// A scan error ends the loop silently, so an unreadable file would look
+	// like a short one and yield a cutoff computed from partial data.
+	if err := sc.Err(); err != nil {
+		return fmt.Errorf("reading %s: %w", path, err)
 	}
 	if !have {
 		return fmt.Errorf("no data rows in %s", path)
@@ -198,7 +209,12 @@ func updateSingleTiingo(path, header, symbol, token string, backfillDays int, fu
 	if err != nil {
 		return err
 	}
-	// do not defer close; close explicitly before rename
+	// Closed and renamed explicitly on success; this leaves no partial .tmp
+	// behind on any error path. Both calls are no-ops after that.
+	defer func() {
+		out.Close()
+		os.Remove(tmp)
+	}()
 
 	// Write original header exactly
 	if _, err := out.WriteString(header + "\n"); err != nil {
@@ -234,6 +250,11 @@ func updateSingleTiingo(path, header, symbol, token string, backfillDays int, fu
 			}
 		}
 	}
+	// Must be checked before the rename: a truncated read here would otherwise
+	// overwrite the original file with only the rows that were read.
+	if err := sc2.Err(); err != nil {
+		return fmt.Errorf("reading %s: %w", path, err)
+	}
 
 	// Append update lines
 	for _, l := range updateLines {
@@ -264,6 +285,9 @@ func updateMultiTiingo(path, header, token string, backfillDays int, fullRedownl
 	sc := bufio.NewScanner(in)
 	sc.Split(bufio.ScanLines)
 	if !sc.Scan() {
+		if err := sc.Err(); err != nil {
+			return fmt.Errorf("reading %s: %w", path, err)
+		}
 		return fmt.Errorf("empty file: %s", path)
 	}
 
@@ -308,6 +332,12 @@ func updateMultiTiingo(path, header, token string, backfillDays int, fullRedownl
 		}
 		prevSym = sym
 		firstData = false
+	}
+	// A scan error ends the loop silently, so an unreadable file would look
+	// like a short one: symbols past the error would be dropped from the
+	// rewrite entirely.
+	if err := sc.Err(); err != nil {
+		return fmt.Errorf("reading %s: %w", path, err)
 	}
 
 	if nonContiguous {
@@ -397,7 +427,12 @@ func updateMultiTiingo(path, header, token string, backfillDays int, fullRedownl
 	if err != nil {
 		return err
 	}
-	// do not defer close; close explicitly before rename
+	// Closed and renamed explicitly on success; this leaves no partial .tmp
+	// behind on any error path. Both calls are no-ops after that.
+	defer func() {
+		out.Close()
+		os.Remove(tmp)
+	}()
 	if _, err := out.WriteString(header + "\n"); err != nil {
 		return err
 	}
@@ -449,6 +484,11 @@ func updateMultiTiingo(path, header, token string, backfillDays int, fullRedownl
 				return err
 			}
 		}
+	}
+	// Must be checked before the rename: a truncated read here would otherwise
+	// overwrite the original file with only the rows that were read.
+	if err := sc2.Err(); err != nil {
+		return fmt.Errorf("reading %s: %w", path, err)
 	}
 	// Flush last symbol's updates
 	if prevSym != "" && !writtenUpdate[prevSym] {

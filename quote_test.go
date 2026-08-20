@@ -1,8 +1,10 @@
 package quote
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -1004,4 +1006,156 @@ func TestParseDateStringUTCConsistency(t *testing.T) {
 		t.Errorf("implicit now (%s) and explicit date (%s) disagree",
 			now.Format("2006-01-02"), explicit.Format("2006-01-02"))
 	}
+}
+
+// --- Scanner error handling ---
+//
+// bufio.Scanner ends its loop silently on error, so an unreadable row used to
+// look like end-of-file. In update mode that is destructive rather than merely
+// wrong: the rewrite drops every row past the error and then renames the
+// truncated .tmp over the user's original file. An oversized line is the
+// reproducible trigger (bufio.ErrTooLong), but a mid-read I/O error behaves the
+// same way.
+
+// oversizedLine exceeds bufio's default token limit, so scanning it fails.
+func oversizedLine() string { return strings.Repeat("x", bufio.MaxScanTokenSize+1) }
+
+// assertUntouched fails if path no longer matches want, or if a .tmp was left.
+func assertUntouched(t *testing.T, path, want string) {
+	t.Helper()
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back %s: %v", path, err)
+	}
+	if string(got) != want {
+		t.Errorf("file was modified by a failed update\nwant:\n%s\n---\ngot:\n%s", want, got)
+	}
+	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+		t.Errorf("left a partial %s.tmp behind", path)
+	}
+}
+
+func TestUpdateSingle_ScanErrorAbortsBeforeFetch(t *testing.T) {
+	initial := strings.Join([]string{
+		"datetime,open,high,low,close,volume",
+		"2025-01-01 00:00,1,1,1,10,100",
+		oversizedLine(),
+		"2025-01-02 00:00,1,1,1,11,100",
+		"",
+	}, "\n")
+	path, _ := writeTempFile(t, "spy.csv", initial)
+
+	prev := tiingoFetch
+	tiingoFetch = func(symbol string, from, to time.Time, token string) ([]tquoteRaw, error) {
+		t.Errorf("fetched %s; the read failure should abort before any request", symbol)
+		return nil, nil
+	}
+	defer func() { tiingoFetch = prev }()
+
+	Delay = 0
+	err := UpdateFileTiingo(path, "token", 2, false, 1, time.Date(2025, 1, 8, 0, 0, 0, 0, time.UTC))
+	if err == nil {
+		t.Fatal("expected an error from the unreadable line, got nil")
+	}
+	if !errors.Is(err, bufio.ErrTooLong) {
+		t.Errorf("err = %v, want it to wrap bufio.ErrTooLong", err)
+	}
+	assertUntouched(t, path, initial)
+}
+
+// The second pass reads the file again after the fetch, so a file that becomes
+// unreadable in between must abort the rewrite rather than rename a partial
+// .tmp over the original.
+func TestUpdateSingle_ScanErrorDuringRewriteDoesNotTruncate(t *testing.T) {
+	initial := strings.Join([]string{
+		"datetime,open,high,low,close,volume",
+		"2025-01-01 00:00,1,1,1,10,100",
+		"2025-01-02 00:00,1,1,1,11,100",
+		"",
+	}, "\n")
+	path, _ := writeTempFile(t, "spy.csv", initial)
+	corrupted := initial + oversizedLine() + "\n"
+
+	prev := tiingoFetch
+	tiingoFetch = func(symbol string, from, to time.Time, token string) ([]tquoteRaw, error) {
+		if err := os.WriteFile(path, []byte(corrupted), 0644); err != nil {
+			t.Fatalf("corrupt file: %v", err)
+		}
+		return []tquoteRaw{{
+			Date: "2025-01-03", AdjOpen: 2, AdjHigh: 3, AdjLow: 1,
+			AdjClose: 43, Volume: 200, SplitFactor: 1.0,
+		}}, nil
+	}
+	defer func() { tiingoFetch = prev }()
+
+	Delay = 0
+	err := UpdateFileTiingo(path, "token", 2, false, 1, time.Date(2025, 1, 8, 0, 0, 0, 0, time.UTC))
+	if err == nil {
+		t.Fatal("expected an error from the unreadable line, got nil")
+	}
+	if !errors.Is(err, bufio.ErrTooLong) {
+		t.Errorf("err = %v, want it to wrap bufio.ErrTooLong", err)
+	}
+	assertUntouched(t, path, corrupted)
+}
+
+func TestUpdateMulti_ScanErrorAbortsBeforeFetch(t *testing.T) {
+	initial := strings.Join([]string{
+		"symbol,datetime,open,high,low,close,volume",
+		"aaa,2025-01-01 00:00,1,1,1,10,100",
+		oversizedLine(),
+		"bbb,2025-01-01 00:00,1,1,1,20,100",
+		"",
+	}, "\n")
+	path, _ := writeTempFile(t, "multi.csv", initial)
+
+	prev := tiingoFetch
+	tiingoFetch = func(symbol string, from, to time.Time, token string) ([]tquoteRaw, error) {
+		t.Errorf("fetched %s; the read failure should abort before any request", symbol)
+		return nil, nil
+	}
+	defer func() { tiingoFetch = prev }()
+
+	Delay = 0
+	err := UpdateFileTiingo(path, "token", 2, false, 1, time.Date(2025, 1, 8, 0, 0, 0, 0, time.UTC))
+	if err == nil {
+		t.Fatal("expected an error from the unreadable line, got nil")
+	}
+	if !errors.Is(err, bufio.ErrTooLong) {
+		t.Errorf("err = %v, want it to wrap bufio.ErrTooLong", err)
+	}
+	assertUntouched(t, path, initial)
+}
+
+func TestUpdateMulti_ScanErrorDuringRewriteDoesNotTruncate(t *testing.T) {
+	initial := strings.Join([]string{
+		"symbol,datetime,open,high,low,close,volume",
+		"aaa,2025-01-01 00:00,1,1,1,10,100",
+		"aaa,2025-01-02 00:00,1,1,1,11,100",
+		"",
+	}, "\n")
+	path, _ := writeTempFile(t, "multi.csv", initial)
+	corrupted := initial + oversizedLine() + "\n"
+
+	prev := tiingoFetch
+	tiingoFetch = func(symbol string, from, to time.Time, token string) ([]tquoteRaw, error) {
+		if err := os.WriteFile(path, []byte(corrupted), 0644); err != nil {
+			t.Errorf("corrupt file: %v", err)
+		}
+		return []tquoteRaw{{
+			Date: "2025-01-03", AdjOpen: 2, AdjHigh: 3, AdjLow: 1,
+			AdjClose: 43, Volume: 200, SplitFactor: 1.0,
+		}}, nil
+	}
+	defer func() { tiingoFetch = prev }()
+
+	Delay = 0
+	err := UpdateFileTiingo(path, "token", 2, false, 1, time.Date(2025, 1, 8, 0, 0, 0, 0, time.UTC))
+	if err == nil {
+		t.Fatal("expected an error from the unreadable line, got nil")
+	}
+	if !errors.Is(err, bufio.ErrTooLong) {
+		t.Errorf("err = %v, want it to wrap bufio.ErrTooLong", err)
+	}
+	assertUntouched(t, path, corrupted)
 }
