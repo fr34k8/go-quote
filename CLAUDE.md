@@ -113,6 +113,12 @@ rather than a silent fallback to daily:
 - Tiingo crypto: 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, d
 - Coinbase: 1m, 5m, 15m, 30m, 1h, d, w (mapped to granularity in seconds)
 
+### Timezones
+All times this package produces are UTC. `time.Unix` and `time.Now` both
+return local times, so any new call site must add `.UTC()` - the CSV format
+carries no zone, so a local wall clock written out and parsed back as UTC
+shifts the instant by the local offset.
+
 ### CSV Format
 Single-symbol: `datetime,open,high,low,close,volume`
 Multi-symbol: `symbol,datetime,open,high,low,close,volume`

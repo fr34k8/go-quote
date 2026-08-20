@@ -86,7 +86,10 @@ func (c *Client) Coinbase(ctx context.Context, symbol string, start, end time.Ti
 		q := NewQuote(symbol, numrows)
 		for row := range numrows {
 			bar := numrows - 1 - row // reverse the order
-			q.Date[bar] = time.Unix(int64(bars[row][0]), 0)
+			// .UTC() matters: time.Unix returns a local time, and the CSV
+			// format carries no zone, so a local wall clock written out and
+			// parsed back as UTC shifted the instant by the local offset.
+			q.Date[bar] = time.Unix(int64(bars[row][0]), 0).UTC()
 			q.Low[bar] = bars[row][1]
 			q.High[bar] = bars[row][2]
 			q.Open[bar] = bars[row][3]

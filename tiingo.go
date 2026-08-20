@@ -203,7 +203,8 @@ func (c *Client) TiingoCrypto(ctx context.Context, symbol string, from, to time.
 	quote := NewQuote(symbol, len(bars))
 	quote.Precision = PrecisionCrypto
 	for i, b := range bars {
-		quote.Date[i], _ = time.Parse(time.RFC3339, b.Date)
+		t, _ := time.Parse(time.RFC3339, b.Date)
+		quote.Date[i] = t.UTC()
 		quote.Open[i] = b.Open
 		quote.High[i] = b.High
 		quote.Low[i] = b.Low

@@ -164,7 +164,7 @@ func updateSingleTiingo(path, header, symbol, token string, backfillDays int, fu
 	}
 
 	if end.IsZero() {
-		end = time.Now()
+		end = time.Now().UTC()
 	}
 
 	// Prefetch overlap/new range and check CA
@@ -252,7 +252,7 @@ func updateSingleTiingo(path, header, symbol, token string, backfillDays int, fu
 // updateMultiTiingo updates a multi-symbol CSV file (symbol as first column) in place.
 func updateMultiTiingo(path, header, token string, backfillDays int, fullRedownload bool, concurrency int, end time.Time) error {
 	if end.IsZero() {
-		end = time.Now()
+		end = time.Now().UTC()
 	}
 
 	// First pass: determine order, earliest and last per symbol

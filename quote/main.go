@@ -397,7 +397,7 @@ func main() {
 		if strings.TrimSpace(flags.end) != "" {
 			endTime = quote.ParseDateString(flags.end)
 		} else {
-			endTime = time.Now()
+			endTime = time.Now().UTC()
 		}
 		if err := quote.UpdateFileTiingo(flags.updatePath, flags.token, flags.backfillDays, flags.fullRedownload, flags.concurrency, endTime); err != nil {
 			fmt.Printf("Error updating %s: %v\n", flags.updatePath, err)

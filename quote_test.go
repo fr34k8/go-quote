@@ -899,3 +899,109 @@ func TestDecimalsIn(t *testing.T) {
 		}
 	}
 }
+
+// --- timezone: every time this package produces must be UTC ---
+
+// TestCoinbaseCSVRoundTripPreservesInstant is the regression test for the
+// write/read asymmetry. Coinbase timestamps came from time.Unix, which returns
+// a local time; the CSV format carries no zone, so the parser read them back
+// as UTC and every timestamp moved by the local offset.
+func TestCoinbaseCSVRoundTripPreservesInstant(t *testing.T) {
+	body := `[[1704067200,0.0804,0.0835,0.0814,0.0834,5731155.2]]` // 2024-01-01 00:00 UTC
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	q, err := newTestClient(srv).Coinbase(context.Background(), "btc-eur",
+		time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC), Daily)
+	if err != nil {
+		t.Fatalf("Coinbase: %v", err)
+	}
+	if len(q.Date) != 1 {
+		t.Fatalf("got %d bars, want 1", len(q.Date))
+	}
+
+	want := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	if !q.Date[0].Equal(want) {
+		t.Errorf("date = %v, want %v", q.Date[0], want)
+	}
+	if got := q.Date[0].Format("2006-01-02 15:04"); got != "2024-01-01 00:00" {
+		t.Errorf("CSV label = %q, want %q (a local-zone value labels it the previous evening)", got, "2024-01-01 00:00")
+	}
+
+	back, err := NewQuoteFromCSV("btc-eur", q.CSV())
+	if err != nil {
+		t.Fatalf("NewQuoteFromCSV: %v", err)
+	}
+	if shift := back.Date[0].Sub(q.Date[0]); shift != 0 {
+		t.Errorf("round trip shifted the instant by %v", shift)
+	}
+}
+
+// All sources must agree on zone, so a Tiingo file and a Coinbase file label
+// the same instant the same way.
+func TestAllSourcesProduceUTC(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/crypto/"):
+			w.Write([]byte(`[{"ticker":"btcusd","priceData":[{"date":"2024-01-01T00:00:00Z","open":1,"high":2,"low":0.5,"close":1.5,"volume":10}]}]`))
+		case strings.Contains(r.URL.Path, "/candles"):
+			w.Write([]byte(`[[1704067200,1,2,0.5,1.5,10]]`))
+		default:
+			w.Write([]byte(`[{"date":"2024-01-01T00:00:00.000Z","adjOpen":1,"adjHigh":2,"adjLow":0.5,"adjClose":1.5,"volume":10}]`))
+		}
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv)
+	from := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	to := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
+
+	daily, err := c.TiingoDaily(context.Background(), "spy", from, to, Daily, "t")
+	if err != nil {
+		t.Fatalf("TiingoDaily: %v", err)
+	}
+	crypto, err := c.TiingoCrypto(context.Background(), "btcusd", from, to, Daily, "t")
+	if err != nil {
+		t.Fatalf("TiingoCrypto: %v", err)
+	}
+	cb, err := c.Coinbase(context.Background(), "btc-usd", from, to, Daily)
+	if err != nil {
+		t.Fatalf("Coinbase: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		q    Quote
+	}{{"tiingo daily", daily}, {"tiingo crypto", crypto}, {"coinbase", cb}} {
+		if len(tc.q.Date) == 0 {
+			t.Fatalf("%s returned no bars", tc.name)
+		}
+		if loc := tc.q.Date[0].Location(); loc != time.UTC {
+			t.Errorf("%s: location = %v, want UTC", tc.name, loc)
+		}
+		if got := tc.q.Date[0].Format("2006-01-02 15:04"); got != "2024-01-01 00:00" {
+			t.Errorf("%s: label = %q, want 2024-01-01 00:00", tc.name, got)
+		}
+	}
+}
+
+// ParseDateString returned a local time for "" and a UTC time for everything
+// else, so the two branches could format to different dates near midnight.
+func TestParseDateStringUTCConsistency(t *testing.T) {
+	if loc := ParseDateString("").Location(); loc != time.UTC {
+		t.Errorf(`ParseDateString("").Location() = %v, want UTC`, loc)
+	}
+	if loc := ParseDateString("2024-01-01").Location(); loc != time.UTC {
+		t.Errorf("ParseDateString(date).Location() = %v, want UTC", loc)
+	}
+	// The implicit "now" and an explicit today must name the same day.
+	now := ParseDateString("")
+	explicit := ParseDateString(now.Format("2006-01-02"))
+	if now.Format("2006-01-02") != explicit.Format("2006-01-02") {
+		t.Errorf("implicit now (%s) and explicit date (%s) disagree",
+			now.Format("2006-01-02"), explicit.Format("2006-01-02"))
+	}
+}

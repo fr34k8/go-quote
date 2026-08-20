@@ -109,7 +109,10 @@ func NewQuote(symbol string, bars int) Quote {
 // ParseDateString - parse a potentially partial date string to Time
 func ParseDateString(dt string) time.Time {
 	if dt == "" {
-		return time.Now()
+		// time.Parse below yields UTC, so use UTC here too: this function
+		// used to return a local time for "" and a UTC time for everything
+		// else, which formatted to different dates near midnight.
+		return time.Now().UTC()
 	}
 	t, _ := time.Parse("2006-01-02 15:04", dt+"0000-01-01 00:00"[len(dt):])
 	return t
