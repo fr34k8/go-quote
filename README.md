@@ -6,6 +6,8 @@ A free quote downloader library and cli
 
 Downloads daily historical price quotes from Tiingo and daily/intraday data from various api's. Written in pure Go. No external dependencies. Now downloads crypto coin historical data from various exchanges.
 
+- Update: 08/19/2026 - Added Binance symbol lists: `binance-usdt`, `binance-usdc`, `binance-btc`, `binance-eth`. `market.go` is now a table rather than a switch plus a dispatch chain, so market lists are testable and a market can no longer be listed as valid without a way to fetch it. `ValidMarkets` is deprecated in favor of `Markets()`
+
 - Update: 08/19/2026 - Added Binance support (`-source=binance`), restoring the source removed in 2024. Uses `data-api.binance.vision`, which needs no API key and is not geo-restricted; `api.binance.com` returns 451 outside eligible regions. Supports every period the package defines, including `3d`, which no other source offers
 
 - Update: 08/19/2026 - Modernization: added `Client` (context, retries, shared HTTP client) and a `Provider` registry; split the library into topic files; requires Go 1.24+. Fixes: EUR/GBP-quoted Coinbase pairs were rounded to 2 decimals and lost their price data, all timestamps are now UTC, `-markets=etf` works from the library API, multi-symbol CSV parsing no longer scrambles symbols, and CSV round-trips no longer append a phantom zero bar. Existing API is unchanged; older entry points still work and are marked deprecated
@@ -84,6 +86,7 @@ etf,nasdaq,nasdaq100,amex,nyse,megacap,largecap,midcap,smallcap,microcap,nanocap
 telecommunications,health_care,finance,real_estate,consumer_discretionary,
 consumer_staples,industrials,basic_materials,energy,utilities,technology
 coinbase,tiingo-usd,tiingo-btc,tiingo-eth
+binance-usdt,binance-usdc,binance-btc,binance-eth
 ```
 
 ## CLI Examples
@@ -258,6 +261,11 @@ Three changes need attention if you have existing data or scripts:
   not in UTC they will shift by your offset, so refetch whole ranges rather than
   diffing old files against new ones. Tiingo files are unaffected - they were
   already UTC.
+- **`ValidMarkets` grew from 26 to 30 entries.** It is an array, so its type
+  changed from `[26]string` to `[30]string`. Ranging over it, indexing it, and
+  `len` all still compile; only an explicit `var m [26]string = quote.ValidMarkets`
+  breaks. Use the new `Markets() []string` instead, which is a slice and will not
+  change type when markets are added.
 - **The CLI now exits 1** on a bad flag instead of 0. A script written as
   `quote -source=bogus && next-step` will now stop where it used to continue.
 

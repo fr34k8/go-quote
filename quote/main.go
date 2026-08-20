@@ -58,6 +58,7 @@ etf,nasdaq,nasdaq100,amex,nyse,megacap,largecap,midcap,smallcap,microcap,nanocap
 telecommunications,health_care,finance,real_estate,consumer_discretionary,
 consumer_staples,industrials,basic_materials,energy,utilities,technology
 coinbase,tiingo-usd,tiingo-btc,tiingo-eth
+binance-usdt,binance-usdc,binance-btc,binance-eth
 `
 
 const (

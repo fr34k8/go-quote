@@ -43,7 +43,7 @@ The library is one package (`quote`) at the repo root, split across topic files:
 | `format.go` | `Format`, `ParseFormat`, `Encode`/`WriteFile` |
 | `encoding.go` | CSV/JSON/Highstock/Amibroker encoders and parsers |
 | `tiingo.go` / `coinbase.go` / `binance.go` | data sources |
-| `market.go` / `ftp.go` | market symbol lists; anonymous FTP |
+| `market.go` / `ftp.go` | `marketSources` table, symbol lists; anonymous FTP |
 | `update.go` | `UpdateFileTiingo` - in-place CSV updates with backfill |
 | `errors.go` / `fetchall.go` | `SymbolNotFoundError`; `FetchAll` |
 
@@ -119,6 +119,18 @@ rather than a silent fallback to daily:
 - Tiingo crypto: 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, d
 - Coinbase: 1m, 5m, 15m, 30m, 1h, d, w (mapped to granularity in seconds)
 - Binance: every period, including 3d - the only source that supports it
+
+### Markets
+`marketSources` (market.go) is the authoritative table mapping a market name to
+its URL builder and response parser; `ValidMarkets` is the documented list and
+`TestMarketTableMatchesValidMarkets` keeps the two in step. Adding a market
+means one table entry, not a switch arm plus a dispatch branch - the drift
+between those two is what made `etf` unreachable. URLs are built from
+`c.nasdaqURL()`/`c.tiingoURL()`/`c.coinbaseURL()`/`c.binanceURL()`, so market
+lists can be pointed at an `httptest.Server`.
+
+`ValidMarkets` is an array, so its type changes whenever a market is added; it
+is deprecated in favor of `Markets() []string`.
 
 ### Timezones
 All times this package produces are UTC. `time.Unix` and `time.Now` both
