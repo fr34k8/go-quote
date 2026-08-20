@@ -1,8 +1,11 @@
 package quote
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -750,5 +753,149 @@ func TestWriteFileMatchesLegacyMethods(t *testing.T) {
 				t.Errorf("Encode(%q) differs from the legacy method", tc.format)
 			}
 		})
+	}
+}
+
+// --- precision: source-declared rather than guessed from the symbol name ---
+
+// TestPrecisionEURPairNotCollapsed is the regression test for the worst case:
+// a Coinbase pair quoted in EUR or GBP contains none of "BTC"/"ETH"/"USD", so
+// the symbol-name heuristic formatted it to 2 decimals and an entire day of
+// sub-euro price action collapsed to a single repeated value.
+func TestPrecisionEURPairNotCollapsed(t *testing.T) {
+	q := NewQuote("DOGE-EUR", 1)
+	q.Precision = PrecisionCrypto
+	q.Date[0] = time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	q.Open[0], q.High[0], q.Low[0], q.Close[0] = 0.0814, 0.0835, 0.0804, 0.0834
+	q.Volume[0] = 5731155.2
+
+	csv := q.CSV()
+	for _, want := range []string{"0.08140000", "0.08350000", "0.08040000", "0.08340000"} {
+		if !strings.Contains(csv, want) {
+			t.Errorf("CSV missing %s:\n%s", want, csv)
+		}
+	}
+
+	// The heuristic alone would have produced 0.08 for all four.
+	if getPrecision("DOGE-EUR") != PrecisionEquity {
+		t.Fatal("precondition: the symbol heuristic should still guess 2 for DOGE-EUR")
+	}
+	if strings.Contains(csv, ",0.08,0.08,0.08,0.08,") {
+		t.Error("OHLC collapsed to a single value")
+	}
+}
+
+// A Quote with no Precision set still falls back to the old heuristic, so
+// hand-built Quotes behave as before.
+func TestPrecisionFallsBackToHeuristic(t *testing.T) {
+	cases := []struct {
+		symbol string
+		want   int
+	}{
+		{"spy", PrecisionEquity},
+		{"btc-usd", PrecisionCrypto},
+	}
+	for _, tc := range cases {
+		q := NewQuote(tc.symbol, 0) // Precision left at zero
+		if got := q.precision(); got != tc.want {
+			t.Errorf("%s: precision() = %d, want %d", tc.symbol, got, tc.want)
+		}
+	}
+
+	// An explicit Precision wins over the heuristic.
+	q := NewQuote("usdu", 0) // heuristic would say 8: the ticker contains "USD"
+	q.Precision = PrecisionEquity
+	if got := q.precision(); got != PrecisionEquity {
+		t.Errorf("explicit Precision ignored: got %d", got)
+	}
+}
+
+// Providers must stamp Precision so encoders never have to guess.
+func TestProvidersSetPrecision(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/crypto/"):
+			w.Write([]byte(`[{"ticker":"btcusd","priceData":[{"date":"2024-01-01T00:00:00Z","open":1,"high":2,"low":0.5,"close":1.5,"volume":10}]}]`))
+		case strings.Contains(r.URL.Path, "/candles"):
+			w.Write([]byte(`[[1704067200,0.0804,0.0835,0.0814,0.0834,5731155.2]]`))
+		default:
+			w.Write([]byte(tiingoDailyBody))
+		}
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv)
+	now := time.Now()
+
+	// An equity ticker containing "USD" must not be treated as crypto.
+	q, err := c.TiingoDaily(context.Background(), "usdu", now, now, Daily, "t")
+	if err != nil {
+		t.Fatalf("TiingoDaily: %v", err)
+	}
+	if q.precision() != PrecisionEquity {
+		t.Errorf("tiingo daily precision = %d, want %d", q.precision(), PrecisionEquity)
+	}
+
+	qc, err := c.TiingoCrypto(context.Background(), "btcusd", now, now, Daily, "t")
+	if err != nil {
+		t.Fatalf("TiingoCrypto: %v", err)
+	}
+	if qc.precision() != PrecisionCrypto {
+		t.Errorf("tiingo crypto precision = %d, want %d", qc.precision(), PrecisionCrypto)
+	}
+
+	qb, err := c.Coinbase(context.Background(), "DOGE-EUR",
+		time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC), Daily)
+	if err != nil {
+		t.Fatalf("Coinbase: %v", err)
+	}
+	if qb.precision() != PrecisionCrypto {
+		t.Errorf("coinbase precision = %d, want %d", qb.precision(), PrecisionCrypto)
+	}
+}
+
+// Reading a file back and writing it out again must not silently round it.
+func TestPrecisionSurvivesCSVRoundTrip(t *testing.T) {
+	orig := "datetime,open,high,low,close,volume\n" +
+		"2024-01-01 00:00,0.08140000,0.08350000,0.08040000,0.08340000,5731155.20000000\n"
+
+	q, err := NewQuoteFromCSV("DOGE-EUR", orig)
+	if err != nil {
+		t.Fatalf("NewQuoteFromCSV: %v", err)
+	}
+	if q.Precision != 8 {
+		t.Errorf("inferred Precision = %d, want 8", q.Precision)
+	}
+	if got := q.CSV(); got != orig {
+		t.Errorf("round trip changed the file:\n got: %q\nwant: %q", got, orig)
+	}
+}
+
+func TestInferPrecisionFloorsAtTwo(t *testing.T) {
+	// Whole numbers must not collapse to zero decimal places.
+	csv := "datetime,open,high,low,close,volume\n2024-01-01 00:00,1,2,3,4,5\n"
+	q, err := NewQuoteFromCSV("spy", csv)
+	if err != nil {
+		t.Fatalf("NewQuoteFromCSV: %v", err)
+	}
+	if q.Precision != PrecisionEquity {
+		t.Errorf("Precision = %d, want %d", q.Precision, PrecisionEquity)
+	}
+	if !strings.Contains(q.CSV(), "1.00,2.00,3.00,4.00") {
+		t.Errorf("unexpected formatting: %s", q.CSV())
+	}
+}
+
+func TestDecimalsIn(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want int
+	}{
+		{"1", 0}, {"1.5", 1}, {"0.08140000", 8}, {"", 0}, {"12.", 0},
+	} {
+		if got := decimalsIn(tc.in); got != tc.want {
+			t.Errorf("decimalsIn(%q) = %d, want %d", tc.in, got, tc.want)
+		}
 	}
 }

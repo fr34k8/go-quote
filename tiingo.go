@@ -68,6 +68,8 @@ func (c *Client) TiingoDaily(ctx context.Context, symbol string, from, to time.T
 // quoteFromTiingoBars converts raw Tiingo bars into a Quote using adjusted prices.
 func quoteFromTiingoBars(symbol string, bars []tquoteRaw) Quote {
 	quote := NewQuote(symbol, len(bars))
+	// Tiingo's daily endpoint serves equities and ETFs.
+	quote.Precision = PrecisionEquity
 	for i, b := range bars {
 		quote.Date[i], _ = parseTiingoDate(b.Date)
 		quote.Open[i] = b.AdjOpen
@@ -199,6 +201,7 @@ func (c *Client) TiingoCrypto(ctx context.Context, symbol string, from, to time.
 
 	bars := crypto[0].PriceData
 	quote := NewQuote(symbol, len(bars))
+	quote.Precision = PrecisionCrypto
 	for i, b := range bars {
 		quote.Date[i], _ = time.Parse(time.RFC3339, b.Date)
 		quote.Open[i] = b.Open

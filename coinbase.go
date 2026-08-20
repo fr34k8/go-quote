@@ -46,6 +46,9 @@ func (c *Client) Coinbase(ctx context.Context, symbol string, start, end time.Ti
 
 	var quote Quote
 	quote.Symbol = symbol
+	// Every Coinbase product is a crypto pair, including the EUR- and
+	// GBP-quoted ones the symbol-name heuristic could not recognize.
+	quote.Precision = PrecisionCrypto
 
 	const maxBars = 200
 	step := time.Second * time.Duration(granularity)

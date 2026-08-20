@@ -124,4 +124,7 @@ Date format: `2006-01-02 15:04` (time is always 00:00 for daily data)
 - No external dependencies
 - All HTTP clients use 10-second timeout (`ClientTimeout` constant)
 - NASDAQ API requests send a fixed `markcheno/go-quote` user agent
-- Precision: 2 decimals for stocks, 8 decimals for crypto (BTC/ETH/USD symbols)
+- Precision: data sources stamp `Quote.Precision` (`PrecisionEquity`=2,
+  `PrecisionCrypto`=8); CSV parsers infer it from the decimals present in the
+  file. `getPrecision`'s symbol-name guess is only a fallback for hand-built
+  Quotes - it misreads EUR/GBP-quoted crypto pairs as 2-decimal equities

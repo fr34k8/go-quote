@@ -72,7 +72,8 @@ func parseCSVDate(s string) (time.Time, error) {
 
 // tquotesToLines converts raw Tiingo quotes to CSV lines matching our formats.
 func tquotesToLines(symbol string, tq []tquoteRaw, multi bool) []string {
-	precision := getPrecision(symbol)
+	// Update mode is Tiingo daily only, which is equities.
+	precision := PrecisionEquity
 	lines := make([]string, 0, len(tq))
 	for _, r := range tq {
 		// Parse YYYY-MM-DD, emit with HH:MM (00:00)

@@ -115,13 +115,40 @@ func ParseDateString(dt string) time.Time {
 	return t
 }
 
+// Decimal places used when formatting prices.
+const (
+	// PrecisionEquity - decimal places for equities
+	PrecisionEquity = 2
+	// PrecisionCrypto - decimal places for cryptocurrencies
+	PrecisionCrypto = 8
+)
+
+// precision reports the decimal places to use when formatting q.
+//
+// A Quote returned by a data source carries the right value in Precision,
+// because the source knows whether it deals in equities or crypto. Only a
+// Quote built by hand or parsed from CSV/JSON falls back to guessing from the
+// symbol, which is unreliable in both directions: a Coinbase pair quoted in
+// EUR or GBP contains none of "BTC"/"ETH"/"USD" and was formatted to 2
+// decimals, collapsing a whole day of sub-euro price action to a single
+// value, while an equity ticker that happens to contain "USD" got 8.
+func (q Quote) precision() int {
+	if q.Precision > 0 {
+		return int(q.Precision)
+	}
+	return getPrecision(q.Symbol)
+}
+
+// getPrecision guesses decimal places from a symbol name.
+//
+// Deprecated in spirit: prefer setting Quote.Precision at the source. This
+// remains the fallback for Quotes that did not come from a provider.
 func getPrecision(symbol string) int {
-	var precision int
-	precision = 2
+	precision := PrecisionEquity
 	if strings.Contains(strings.ToUpper(symbol), "BTC") ||
 		strings.Contains(strings.ToUpper(symbol), "ETH") ||
 		strings.Contains(strings.ToUpper(symbol), "USD") {
-		precision = 8
+		precision = PrecisionCrypto
 	}
 	return precision
 }

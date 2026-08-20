@@ -15,7 +15,7 @@ import (
 // CSV - convert Quote structure to csv string
 func (q Quote) CSV() string {
 
-	precision := getPrecision(q.Symbol)
+	precision := q.precision()
 
 	var buffer bytes.Buffer
 	buffer.WriteString("datetime,open,high,low,close,volume\n")
@@ -30,7 +30,7 @@ func (q Quote) CSV() string {
 // Highstock - convert Quote structure to Highstock json format
 func (q Quote) Highstock() string {
 
-	precision := getPrecision(q.Symbol)
+	precision := q.precision()
 
 	var buffer bytes.Buffer
 	buffer.WriteString("[\n")
@@ -51,7 +51,7 @@ func (q Quote) Highstock() string {
 // Amibroker - convert Quote structure to csv string
 func (q Quote) Amibroker() string {
 
-	precision := getPrecision(q.Symbol)
+	precision := q.precision()
 
 	var buffer bytes.Buffer
 	buffer.WriteString("date,time,open,high,low,close,volume\n")
@@ -132,11 +132,40 @@ func csvRows(csv string, want int) [][]string {
 	return rows
 }
 
+// decimalsIn reports the number of digits after the decimal point in a
+// numeric field, as written.
+func decimalsIn(field string) int {
+	if i := strings.IndexByte(field, '.'); i >= 0 {
+		return len(field) - i - 1
+	}
+	return 0
+}
+
+// inferPrecision picks the decimal places to preserve when re-encoding a
+// parsed Quote. Without this a CSV round-trip would re-apply the symbol-name
+// guess, so reading back a EUR-quoted crypto file and writing it out again
+// would round every price to cents.
+func inferPrecision(rows [][]string, cols []int) int64 {
+	maxDec := 0
+	for _, r := range rows {
+		for _, c := range cols {
+			if c < len(r) {
+				maxDec = max(maxDec, decimalsIn(r[c]))
+			}
+		}
+	}
+	if maxDec < PrecisionEquity {
+		maxDec = PrecisionEquity
+	}
+	return int64(maxDec)
+}
+
 // NewQuoteFromCSV - parse csv quote string into Quote structure
 func NewQuoteFromCSV(symbol, csv string) (Quote, error) {
 
 	rows := csvRows(csv, 6)
 	q := NewQuote(symbol, len(rows))
+	q.Precision = inferPrecision(rows, []int{1, 2, 3, 4})
 
 	for bar, line := range rows {
 		q.Date[bar], _ = time.Parse("2006-01-02 15:04", line[0])
@@ -161,6 +190,7 @@ func NewQuoteFromCSVDateFormat(symbol, csv string, format string) (Quote, error)
 	// NewQuote("", ...) here dropped the caller's symbol on the floor; the
 	// sibling NewQuoteFromCSV always set it.
 	q := NewQuote(symbol, len(rows))
+	q.Precision = inferPrecision(rows, []int{1, 2, 3, 4})
 
 	for bar, line := range rows {
 		q.Date[bar], _ = time.Parse(format, line[0])
@@ -242,7 +272,7 @@ func (q Quotes) CSV() string {
 
 	for sym := range q {
 		quote := q[sym]
-		precision := getPrecision(quote.Symbol)
+		precision := quote.precision()
 		for bar := range quote.Close {
 			str := fmt.Sprintf("%s,%s,%.*f,%.*f,%.*f,%.*f,%.*f\n",
 				quote.Symbol, quote.Date[bar].Format("2006-01-02 15:04"), precision, quote.Open[bar], precision, quote.High[bar], precision, quote.Low[bar], precision, quote.Close[bar], precision, quote.Volume[bar])
@@ -262,7 +292,7 @@ func (q Quotes) Highstock() string {
 
 	for sym := range q {
 		quote := q[sym]
-		precision := getPrecision(quote.Symbol)
+		precision := quote.precision()
 		// The opening `"sym":[` must be written unconditionally. Emitting it
 		// inside the bar loop meant a symbol with zero bars produced a closing
 		// bracket with no opener, making the whole document invalid JSON.
@@ -297,7 +327,7 @@ func (q Quotes) Amibroker() string {
 
 	for sym := range q {
 		quote := q[sym]
-		precision := getPrecision(quote.Symbol)
+		precision := quote.precision()
 		for bar := range quote.Close {
 			str := fmt.Sprintf("%s,%s,%s,%.*f,%.*f,%.*f,%.*f,%.*f\n",
 				quote.Symbol, quote.Date[bar].Format("2006-01-02"), quote.Date[bar].Format("15:04"), precision, quote.Open[bar], precision, quote.High[bar], precision, quote.Low[bar], precision, quote.Close[bar], precision, quote.Volume[bar])
@@ -353,6 +383,7 @@ func NewQuotesFromCSV(csv string) (Quotes, error) {
 	for _, sym := range order {
 		bars := index[sym]
 		q := NewQuote(sym, bars)
+		q.Precision = inferPrecision(rows, []int{2, 3, 4, 5})
 		for bar := range bars {
 			line := rows[row]
 			q.Date[bar], _ = time.Parse("2006-01-02 15:04", line[1])
