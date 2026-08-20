@@ -216,8 +216,8 @@ func getSymbols(flags quoteflags, args []string) ([]string, error) {
 		}
 	} else if flags.markets != "" {
 
-		markets := strings.Split(flags.markets, ",")
-		for _, cmd := range markets {
+		markets := strings.SplitSeq(flags.markets, ",")
+		for cmd := range markets {
 			if !quote.ValidMarket(cmd) {
 				return symbols, fmt.Errorf("invalid market specified: %s", cmd)
 			}

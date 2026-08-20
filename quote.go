@@ -1413,7 +1413,7 @@ func NewEtfList() ([]string, error) {
 		return symbols, err
 	}
 
-	for _, line := range strings.Split(string(buf), "\n") {
+	for line := range strings.SplitSeq(string(buf), "\n") {
 		// ACT Symbol|Security Name|Exchange|CQS Symbol|ETF|Round Lot Size|Test Issue|NASDAQ Symbol
 		cols := strings.Split(line, "|")
 		if len(cols) > 5 && cols[4] == "Y" && cols[6] == "N" {
